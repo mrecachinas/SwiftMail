@@ -13,9 +13,10 @@ extension IMAPConnection {
     func forceCloseTransport() {
         transportGenerationLock.lock()
         transportGeneration += 1
+        let channel = self.channel
+        self.channel = nil
         transportGenerationLock.unlock()
         channel?.close(promise: nil)
-        channel = nil
         isSessionAuthenticated = false
         capabilities = []
         namespaces = nil
@@ -44,11 +45,10 @@ extension IMAPConnection {
         let bootstrap = makeConnectionBootstrap(initialTLSMode: tlsTransportMode, greetingHandler: greetingHandler)
         let channel = try await openChannel(bootstrap: bootstrap, greetingPromise: greetingPromise)
 
-        guard isCurrentTransportGeneration(generation) else {
+        guard publishChannelIfCurrent(channel, generation: generation) else {
             channel.close(promise: nil)
             throw CancellationError()
         }
-        self.channel = channel
         self.isSessionAuthenticated = false
         self.namespaces = nil
 

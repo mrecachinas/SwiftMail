@@ -53,6 +53,16 @@ final class IMAPConnection {
         return transportGeneration == generation
     }
 
+    func publishChannelIfCurrent(_ channel: Channel, generation: Int) -> Bool {
+        transportGenerationLock.lock()
+        defer { transportGenerationLock.unlock() }
+        guard transportGeneration == generation else {
+            return false
+        }
+        self.channel = channel
+        return true
+    }
+
     /// - Note: `minimumTLSVersion` and `parserLimits` deliberately have **no defaults.**
     ///   They used to, and `makeIdleConnection`/`makeNamedConnection` simply left them out — so
     ///   a server configured with a TLS 1.3 floor and 64 MiB parser limits spawned IDLE and named
