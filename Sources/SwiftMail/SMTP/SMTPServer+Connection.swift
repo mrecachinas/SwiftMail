@@ -45,20 +45,22 @@ extension SMTPServer {
      - Note: Logs connection attempts and capability retrieval at info level
      */
     public func connect() async throws {
+        let generation = transportGeneration
         let permit = try await operationGate.acquire()
         defer { operationGate.release(permit) }
-        try await connect(holding: permit)
+        guard generation == transportGeneration else {
+            throw CancellationError()
+        }
+        try await connect(holding: permit, generation: generation)
     }
 
-    private func connect(holding permit: SMTPOperationGate.Permit) async throws {
+    private func connect(holding permit: SMTPOperationGate.Permit, generation: Int) async throws {
         logger.debug("Connecting to SMTP server at \(host):\(port)")
 
         let transportMode = Self.resolveTransportMode(
             port: port,
             transportSecurity: transportSecurity
         )
-        let generation = transportGeneration
-
         // Create the greeting promise and handler before connecting: the server
         // sends its greeting immediately on accept, so the handler must already
         // be in the pipeline when the first bytes arrive — otherwise a fast

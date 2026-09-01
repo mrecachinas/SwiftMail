@@ -25,7 +25,7 @@ extension IMAPConnection {
         responseBuffer.reset()
     }
 
-    func connectBody() async throws {
+    func connectBody(expectedGeneration: Int? = nil) async throws {
         clearInvalidChannel()
         if channel?.isActive == true {
             logger.debug("\(connectionContext) connect requested while channel is already active")
@@ -38,7 +38,7 @@ extension IMAPConnection {
         idleTerminationInProgress = false
 
         let tlsTransportMode = try Self.resolveTLSTransportMode(port: port, transportSecurity: transportSecurity)
-        let generation = captureTransportGeneration()
+        let generation = expectedGeneration ?? captureTransportGeneration()
         let greetingPromise = group.next().makePromise(of: [Capability].self)
         let greetingHandler = IMAPGreetingHandler(commandTag: "", promise: greetingPromise)
 

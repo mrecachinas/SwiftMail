@@ -266,8 +266,12 @@ final class IMAPConnection {
     }
 
     func connect() async throws {
+        let generation = captureTransportGeneration()
         try await commandQueue.run { [self] in
-            try await self.connectBody()
+            guard self.isCurrentTransportGeneration(generation) else {
+                throw CancellationError()
+            }
+            try await self.connectBody(expectedGeneration: generation)
         }
     }
 
