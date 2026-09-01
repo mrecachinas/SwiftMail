@@ -20,7 +20,7 @@ final class SMTPLogger: MailLogger, @unchecked Sendable {
         // Byte buffers include SMTP LOGIN/XOAUTH2 continuation credentials and
         // message content; never render their bytes into a trace message.
         let commandString: String
-        if command is IOData {
+        if command is IOData || command is ByteBuffer {
             commandString = "<redacted outbound data>"
         } else {
             commandString = stringRepresentation(from: command)
