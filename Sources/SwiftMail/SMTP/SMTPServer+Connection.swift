@@ -92,6 +92,7 @@ extension SMTPServer {
 
         // Wait for the server greeting
         let greeting = try await waitForGreeting(greetingPromise: greetingPromise)
+        try validateCurrentTransport(channel, generation: generation)
 
         // Check if the greeting is positive
         guard greeting.code >= 200 && greeting.code < 300 else {
@@ -100,14 +101,28 @@ extension SMTPServer {
 
         // Fetch capabilities using our new method
         let capabilities = try await fetchCapabilities(holding: permit)
+        try validateCurrentTransport(channel, generation: generation)
 
         try await applyPostEHLOTLSPolicy(
             transportMode: transportMode,
             capabilities: capabilities,
             holding: permit
         )
+        try validateCurrentTransport(channel, generation: generation)
 
         logger.info("Connected to SMTP server \(self.host):\(self.port)")
+    }
+
+    private func validateCurrentTransport(_ channel: Channel, generation: Int) throws {
+        guard transportGeneration == generation else {
+            if self.channel === channel {
+                self.channel = nil
+                capabilities = []
+                isTLSEnabled = false
+            }
+            channel.close(promise: nil)
+            throw CancellationError()
+        }
     }
 
     /// Await the server greeting captured by the greeting handler installed in

@@ -59,8 +59,28 @@ extension IMAPConnection {
             greetingPromise: greetingPromise,
             greetingHandler: greetingHandler
         )
+        try validateCurrentTransport(channel, generation: generation)
         try await refreshCapabilities(using: greetingCapabilities)
+        try validateCurrentTransport(channel, generation: generation)
         try await applyPostGreetingTLSPolicy(tlsTransportMode: tlsTransportMode, capabilities: Array(capabilities))
+        try validateCurrentTransport(channel, generation: generation)
+    }
+
+    private func validateCurrentTransport(_ channel: Channel, generation: Int) throws {
+        transportGenerationLock.lock()
+        let isCurrent = transportGeneration == generation
+        if !isCurrent {
+            if self.channel === channel {
+                self.channel = nil
+            }
+            capabilities = []
+            namespaces = nil
+        }
+        transportGenerationLock.unlock()
+        guard isCurrent else {
+            channel.close(promise: nil)
+            throw CancellationError()
+        }
     }
 
     private func makeConnectionBootstrap(
