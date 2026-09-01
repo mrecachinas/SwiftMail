@@ -13,10 +13,19 @@ extension SMTPServer {
     /// skips QUIT so a stalled command cannot delay transport teardown.
     public func forceCloseTransport() {
         transportGeneration += 1
+        let channel = self.channel
+        self.channel = nil
         channel?.close(promise: nil)
-        channel = nil
         isTLSEnabled = false
         capabilities = []
+    }
+
+    private func publishChannelIfCurrent(_ channel: Channel, generation: Int) -> Bool {
+        guard transportGeneration == generation else {
+            return false
+        }
+        self.channel = channel
+        return true
     }
 
     /**
@@ -74,12 +83,10 @@ extension SMTPServer {
             throw error
         }
 
-        guard generation == transportGeneration else {
+        guard publishChannelIfCurrent(channel, generation: generation) else {
             channel.close(promise: nil)
             throw CancellationError()
         }
-        // Store the channel
-        self.channel = channel
 
         // Wait for the server greeting
         let greeting = try await waitForGreeting(greetingPromise: greetingPromise)
