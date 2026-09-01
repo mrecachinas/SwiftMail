@@ -5,6 +5,17 @@ import NIOIMAPCore
 import NIO
 import NIOSSL
 
+final class IMAPTransportState: @unchecked Sendable {
+    let lock = NSLock()
+    var channel: Channel?
+    var capabilities: Set<NIOIMAPCore.Capability> = []
+    var namespaces: NamespaceResponse?
+    var isSessionAuthenticated = false
+    var idleHandler: IdleHandler?
+    var idleTerminationInProgress = false
+    var generation = 0
+}
+
 /// Internal connection wrapper used by IMAPServer to manage per-connection state.
 final class IMAPConnection {
     enum TLSTransportMode: Equatable {
@@ -25,41 +36,58 @@ final class IMAPConnection {
     let connectionID: String
     let connectionRole: String
     let connectionContext: String
-    var channel: Channel?
+    let transportState = IMAPTransportState()
+    var channel: Channel? {
+        get { transportState.lock.withLock { transportState.channel } }
+        set { transportState.lock.withLock { transportState.channel = newValue } }
+    }
     var commandTagCounter: Int = 0
-    var capabilities: Set<NIOIMAPCore.Capability> = []
-    var namespaces: NamespaceResponse?
-    var isSessionAuthenticated: Bool = false
-    var idleHandler: IdleHandler?
-    var idleTerminationInProgress: Bool = false
+    var capabilities: Set<NIOIMAPCore.Capability> {
+        get { transportState.lock.withLock { transportState.capabilities } }
+        set { transportState.lock.withLock { transportState.capabilities = newValue } }
+    }
+    var namespaces: NamespaceResponse? {
+        get { transportState.lock.withLock { transportState.namespaces } }
+        set { transportState.lock.withLock { transportState.namespaces = newValue } }
+    }
+    var isSessionAuthenticated: Bool {
+        get { transportState.lock.withLock { transportState.isSessionAuthenticated } }
+        set { transportState.lock.withLock { transportState.isSessionAuthenticated = newValue } }
+    }
+    var idleHandler: IdleHandler? {
+        get { transportState.lock.withLock { transportState.idleHandler } }
+        set { transportState.lock.withLock { transportState.idleHandler = newValue } }
+    }
+    var idleTerminationInProgress: Bool {
+        get { transportState.lock.withLock { transportState.idleTerminationInProgress } }
+        set { transportState.lock.withLock { transportState.idleTerminationInProgress = newValue } }
+    }
     let commandQueue = IMAPCommandQueue()
     let responseBuffer = UntaggedResponseBuffer()
     var startTLSUpgradeOverrideForTesting: (() async throws -> Void)?
-    let transportGenerationLock = NSLock()
-    var transportGeneration = 0
+    var transportGeneration: Int {
+        get { transportState.lock.withLock { transportState.generation } }
+        set { transportState.lock.withLock { transportState.generation = newValue } }
+    }
 
     let logger: Logging.Logger
     let duplexLogger: IMAPLogger
 
     func captureTransportGeneration() -> Int {
-        transportGenerationLock.lock()
-        defer { transportGenerationLock.unlock() }
-        return transportGeneration
+        transportState.lock.withLock { transportState.generation }
     }
 
     func isCurrentTransportGeneration(_ generation: Int) -> Bool {
-        transportGenerationLock.lock()
-        defer { transportGenerationLock.unlock() }
-        return transportGeneration == generation
+        transportState.lock.withLock { transportState.generation == generation }
     }
 
     func publishChannelIfCurrent(_ channel: Channel, generation: Int) -> Bool {
-        transportGenerationLock.lock()
-        defer { transportGenerationLock.unlock() }
-        guard transportGeneration == generation else {
+        transportState.lock.lock()
+        defer { transportState.lock.unlock() }
+        guard transportState.generation == generation else {
             return false
         }
-        self.channel = channel
+        transportState.channel = channel
         return true
     }
 

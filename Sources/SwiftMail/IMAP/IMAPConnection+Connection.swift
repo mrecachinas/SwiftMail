@@ -11,17 +11,18 @@ extension IMAPConnection {
     /// skips LOGOUT/DONE so a stalled protocol operation cannot delay transport
     /// teardown.
     func forceCloseTransport() {
-        transportGenerationLock.lock()
-        transportGeneration += 1
-        let channel = self.channel
-        self.channel = nil
-        transportGenerationLock.unlock()
+        let channel = transportState.lock.withLock {
+            transportState.generation += 1
+            let channel = transportState.channel
+            transportState.channel = nil
+            transportState.isSessionAuthenticated = false
+            transportState.capabilities = []
+            transportState.namespaces = nil
+            transportState.idleHandler = nil
+            transportState.idleTerminationInProgress = false
+            return channel
+        }
         channel?.close(promise: nil)
-        isSessionAuthenticated = false
-        capabilities = []
-        namespaces = nil
-        idleHandler = nil
-        idleTerminationInProgress = false
         responseBuffer.reset()
     }
 
@@ -67,16 +68,19 @@ extension IMAPConnection {
     }
 
     private func validateCurrentTransport(_ channel: Channel, generation: Int) throws {
-        transportGenerationLock.lock()
-        let isCurrent = transportGeneration == generation
+        transportState.lock.lock()
+        let isCurrent = transportState.generation == generation
         if !isCurrent {
-            if self.channel === channel {
-                self.channel = nil
+            if transportState.channel === channel {
+                transportState.channel = nil
             }
-            capabilities = []
-            namespaces = nil
+            transportState.isSessionAuthenticated = false
+            transportState.capabilities = []
+            transportState.namespaces = nil
+            transportState.idleHandler = nil
+            transportState.idleTerminationInProgress = false
         }
-        transportGenerationLock.unlock()
+        transportState.lock.unlock()
         guard isCurrent else {
             channel.close(promise: nil)
             throw CancellationError()
