@@ -17,8 +17,14 @@ final class SMTPLogger: MailLogger, @unchecked Sendable {
         // Try to extract the command from the data
         let command = unwrapOutboundIn(data)
 
-        // Get string representation of the command
-        let commandString = stringRepresentation(from: command)
+        // Byte buffers include SMTP LOGIN/XOAUTH2 continuation credentials and
+        // message content; never render their bytes into a trace message.
+        let commandString: String
+        if command is IOData {
+            commandString = "<redacted outbound data>"
+        } else {
+            commandString = stringRepresentation(from: command)
+        }
 
         // Redact sensitive information in AUTH commands
         if commandString.hasPrefix("AUTH") || commandString.hasPrefix("auth") {

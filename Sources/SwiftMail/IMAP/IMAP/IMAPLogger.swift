@@ -43,8 +43,16 @@ final class IMAPLogger: MailLogger, @unchecked Sendable {
     override func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
         let command = unwrapOutboundIn(data)
 
-        // Get string representation of the command
-        let commandString = stringRepresentation(from: command)
+        // Continuation responses carry base64 credentials for XOAUTH2/PLAIN
+        // and raw message data for APPEND; never render their bytes.
+        let commandString: String
+        if let message = command as? NIOIMAP.IMAPClientHandler.Message,
+           case .part(let streamPart) = message,
+           case .continuationResponse = streamPart {
+            commandString = "<redacted outbound continuation>"
+        } else {
+            commandString = stringRepresentation(from: command)
+        }
 
         // Redact sensitive information in LOGIN and AUTH commands
         let range = NSRange(location: 0, length: commandString.utf16.count)
