@@ -6,6 +6,11 @@ import NIO
 // MARK: - Connection and Login
 
 extension IMAPServer {
+    /// Immediately closes the primary transport without waiting on a queued command.
+    public func forceCloseTransport() {
+        primaryConnection.forceCloseTransport()
+    }
+
     /**
      Connect to the IMAP server using SSL/TLS
 

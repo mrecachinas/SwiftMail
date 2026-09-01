@@ -5,6 +5,22 @@ import NIO
 import NIOSSL
 
 extension IMAPConnection {
+    /// Immediately closes the channel without entering the command queue.
+    ///
+    /// This is reserved for cancellation and deadline handlers. It deliberately
+    /// skips LOGOUT/DONE so a stalled protocol operation cannot delay transport
+    /// teardown.
+    func forceCloseTransport() {
+        channel?.close(promise: nil)
+        channel = nil
+        isSessionAuthenticated = false
+        capabilities = []
+        namespaces = nil
+        idleHandler = nil
+        idleTerminationInProgress = false
+        responseBuffer.reset()
+    }
+
     func connectBody() async throws {
         clearInvalidChannel()
         if channel?.isActive == true {

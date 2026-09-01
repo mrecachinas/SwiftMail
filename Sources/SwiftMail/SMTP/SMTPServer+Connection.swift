@@ -7,6 +7,17 @@ import NIOCore
 import NIOSSL
 
 extension SMTPServer {
+    /// Immediately closes the channel without entering the SMTP operation gate.
+    ///
+    /// This is reserved for cancellation and deadline handlers. It deliberately
+    /// skips QUIT so a stalled command cannot delay transport teardown.
+    public func forceCloseTransport() {
+        channel?.close(promise: nil)
+        channel = nil
+        isTLSEnabled = false
+        capabilities = []
+    }
+
     /**
      Connect to the SMTP server
 
