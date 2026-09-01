@@ -35,9 +35,23 @@ final class IMAPConnection {
     let commandQueue = IMAPCommandQueue()
     let responseBuffer = UntaggedResponseBuffer()
     var startTLSUpgradeOverrideForTesting: (() async throws -> Void)?
+    let transportGenerationLock = NSLock()
+    var transportGeneration = 0
 
     let logger: Logging.Logger
     let duplexLogger: IMAPLogger
+
+    func captureTransportGeneration() -> Int {
+        transportGenerationLock.lock()
+        defer { transportGenerationLock.unlock() }
+        return transportGeneration
+    }
+
+    func isCurrentTransportGeneration(_ generation: Int) -> Bool {
+        transportGenerationLock.lock()
+        defer { transportGenerationLock.unlock() }
+        return transportGeneration == generation
+    }
 
     /// - Note: `minimumTLSVersion` and `parserLimits` deliberately have **no defaults.**
     ///   They used to, and `makeIdleConnection`/`makeNamedConnection` simply left them out — so

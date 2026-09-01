@@ -12,6 +12,7 @@ extension SMTPServer {
     /// This is reserved for cancellation and deadline handlers. It deliberately
     /// skips QUIT so a stalled command cannot delay transport teardown.
     public func forceCloseTransport() {
+        transportGeneration += 1
         channel?.close(promise: nil)
         channel = nil
         isTLSEnabled = false
@@ -47,6 +48,7 @@ extension SMTPServer {
             port: port,
             transportSecurity: transportSecurity
         )
+        let generation = transportGeneration
 
         // Create the greeting promise and handler before connecting: the server
         // sends its greeting immediately on accept, so the handler must already
@@ -72,6 +74,10 @@ extension SMTPServer {
             throw error
         }
 
+        guard generation == transportGeneration else {
+            channel.close(promise: nil)
+            throw CancellationError()
+        }
         // Store the channel
         self.channel = channel
 

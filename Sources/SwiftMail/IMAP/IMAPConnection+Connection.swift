@@ -11,6 +11,9 @@ extension IMAPConnection {
     /// skips LOGOUT/DONE so a stalled protocol operation cannot delay transport
     /// teardown.
     func forceCloseTransport() {
+        transportGenerationLock.lock()
+        transportGeneration += 1
+        transportGenerationLock.unlock()
         channel?.close(promise: nil)
         channel = nil
         isSessionAuthenticated = false
@@ -34,12 +37,17 @@ extension IMAPConnection {
         idleTerminationInProgress = false
 
         let tlsTransportMode = try Self.resolveTLSTransportMode(port: port, transportSecurity: transportSecurity)
+        let generation = captureTransportGeneration()
         let greetingPromise = group.next().makePromise(of: [Capability].self)
         let greetingHandler = IMAPGreetingHandler(commandTag: "", promise: greetingPromise)
 
         let bootstrap = makeConnectionBootstrap(initialTLSMode: tlsTransportMode, greetingHandler: greetingHandler)
         let channel = try await openChannel(bootstrap: bootstrap, greetingPromise: greetingPromise)
 
+        guard isCurrentTransportGeneration(generation) else {
+            channel.close(promise: nil)
+            throw CancellationError()
+        }
         self.channel = channel
         self.isSessionAuthenticated = false
         self.namespaces = nil

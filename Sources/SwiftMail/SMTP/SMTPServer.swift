@@ -89,6 +89,7 @@ public actor SMTPServer {
 
     /** Server capabilities reported by EHLO command */
     var capabilities: [String] = []
+    var transportGeneration = 0
 
     /// Whether the server advertised the `8BITMIME` extension in the most recent EHLO response.
     public var supports8BitMIME: Bool {
