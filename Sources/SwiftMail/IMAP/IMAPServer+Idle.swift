@@ -54,11 +54,21 @@ extension IMAPServer {
 
         let sessionID = UUID()
         let resolvedMailbox = resolveMailboxPath(mailbox)
+        let registrationEpoch = lifecycleState.captureRegistrationEpoch()
         // Each IDLE connection gets its own EventLoopGroup so that IMAPServer.deinit
         // shutting down the primary group cannot pull the rug from under a long-lived
         // IDLE cycle task (which is Task.detached and can outlive the server).
         let idleGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        let connection = makeIdleConnection(sessionID: sessionID, mailbox: resolvedMailbox, group: idleGroup)
+        let connection = makeIdleConnection(
+            sessionID: sessionID,
+            mailbox: resolvedMailbox,
+            group: idleGroup,
+            registrationEpoch: registrationEpoch
+        )
+        guard lifecycleState.isCurrentRegistration(connection, epoch: registrationEpoch) else {
+            try? await idleGroup.shutdownGracefully()
+            throw CancellationError()
+        }
         let authenticationGeneration = connection.captureAuthenticationGeneration()
         idleConnections[sessionID] = IdleConnection(
             mailbox: resolvedMailbox,
@@ -89,11 +99,13 @@ extension IMAPServer {
                 idleGroup: idleGroup,
                 configuration: idleConfiguration,
                 authentication: authentication,
-                authenticationGeneration: authenticationGeneration
+                authenticationGeneration: authenticationGeneration,
+                registrationEpoch: registrationEpoch
             )
             return startResilientIdleSession(request: request)
         } catch {
             idleConnections[sessionID] = nil
+            lifecycleState.unregister(connection)
             try? await connection.disconnect()
             try? await idleGroup.shutdownGracefully()
             throw error
@@ -164,7 +176,9 @@ extension IMAPServer {
             await IMAPResilientIdleRunner.run(context: context)
             continuation.finish()
         }
-        lifecycleState.registerCancellationHandler(for: connection) {
+        lifecycleState.registerCancellationHandler(
+            for: connection, registrationEpoch: request.registrationEpoch
+        ) {
             cycleTask.cancel()
         }
 
@@ -222,4 +236,5 @@ struct IdleSessionRequest {
     let configuration: IMAPIdleConfiguration
     let authentication: IMAPServer.Authentication
     let authenticationGeneration: Int
+    let registrationEpoch: UInt64
 }

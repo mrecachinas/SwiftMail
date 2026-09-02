@@ -35,38 +35,106 @@ final class IMAPServerLifecycleState: @unchecked Sendable {
     private let lock = NSLock()
     private var connections: [ObjectIdentifier: IMAPConnection] = [:]
     private var cancellationHandlers: [ObjectIdentifier: @Sendable () -> Void] = [:]
+    private var registrationEpoch: UInt64 = 0
+    private var signingOut = false
+    private var closing = false
 
-    func register(_ connection: IMAPConnection) {
-        lock.withLock { connections[ObjectIdentifier(connection)] = connection }
+    func captureRegistrationEpoch() -> UInt64 {
+        lock.withLock { registrationEpoch }
     }
 
+    @discardableResult
+    func register(_ connection: IMAPConnection, registrationEpoch expectedEpoch: UInt64? = nil) -> Bool {
+        let accepted = lock.withLock {
+            guard !signingOut, !closing,
+                  expectedEpoch.map({ $0 == registrationEpoch }) ?? true else {
+                return false
+            }
+            connections[ObjectIdentifier(connection)] = connection
+            return true
+        }
+        if !accepted {
+            connection.forceCloseTransport()
+        }
+        return accepted
+    }
+
+    @discardableResult
     func registerCancellationHandler(
         for connection: IMAPConnection,
+        registrationEpoch expectedEpoch: UInt64? = nil,
         _ handler: @escaping @Sendable () -> Void
-    ) {
+    ) -> Bool {
+        let accepted = lock.withLock {
+            let id = ObjectIdentifier(connection)
+            guard connections[id] != nil, !signingOut, !closing,
+                  expectedEpoch.map({ $0 == registrationEpoch }) ?? true else {
+                return false
+            }
+            cancellationHandlers[id] = handler
+            return true
+        }
+        if !accepted {
+            handler()
+        }
+        return accepted
+    }
+
+    func unregister(_ connection: IMAPConnection) {
         lock.withLock {
             let id = ObjectIdentifier(connection)
-            connections[id] = connection
-            cancellationHandlers[id] = handler
+            connections.removeValue(forKey: id)
+            cancellationHandlers.removeValue(forKey: id)
+        }
+    }
+
+    func isCurrentRegistration(_ connection: IMAPConnection, epoch: UInt64) -> Bool {
+        lock.withLock {
+            !signingOut && !closing && registrationEpoch == epoch
+                && connections[ObjectIdentifier(connection)] != nil
         }
     }
 
     func forceCloseAll() {
-        let snapshot = lock.withLock {
-            (Array(connections.values), Array(cancellationHandlers.values))
+        let snapshot: ([IMAPConnection], [@Sendable () -> Void])? = lock.withLock {
+            guard !closing else { return nil }
+            closing = true
+            registrationEpoch &+= 1
+            let snapshot = (Array(connections.values), Array(cancellationHandlers.values))
+            connections.removeAll()
+            cancellationHandlers.removeAll()
+            return snapshot
         }
+        guard let snapshot else { return }
         snapshot.1.forEach { $0() }
         snapshot.0.forEach { $0.forceCloseTransport() }
+        lock.withLock { closing = false }
     }
 
     func beginSignOut() {
         replayEpoch.invalidate()
+        lock.withLock {
+            signingOut = true
+            registrationEpoch &+= 1
+        }
         forceCloseAll()
     }
 
     func invalidateAuthenticationGenerations() {
         let snapshot = lock.withLock { Array(connections.values) }
         snapshot.forEach { $0.invalidateAuthenticationGeneration() }
+    }
+
+    func finishSignOut() {
+        lock.withLock { signingOut = false }
+    }
+
+    var registeredConnectionCountForTesting: Int {
+        lock.withLock { connections.count }
+    }
+
+    var cancellationHandlerCountForTesting: Int {
+        lock.withLock { cancellationHandlers.count }
     }
 }
 

@@ -96,6 +96,8 @@ import Testing
                 try await Task.sleep(nanoseconds: 1_000_000_000)
                 #expect(testServer.idleCommandCount >= 2)
                 try await session.done()
+                #expect(server.lifecycleState.registeredConnectionCountForTesting == 1)
+                #expect(server.lifecycleState.cancellationHandlerCountForTesting == 0)
                 try? await server.disconnect()
             }
         }
@@ -153,8 +155,9 @@ import Testing
 
                 // A redundant done() after disconnect must be safe and idempotent.
                 try? await session.done()
+                #expect(server.lifecycleState.registeredConnectionCountForTesting == 1)
+                #expect(server.lifecycleState.cancellationHandlerCountForTesting == 0)
             }
-
         }
 
         @Test
@@ -275,6 +278,8 @@ import Testing
                 #expect(testServer.acceptedConnectionCount == connectionsBefore)
 
                 try? await server.disconnect()
+                #expect(server.lifecycleState.registeredConnectionCountForTesting == 1)
+                #expect(server.lifecycleState.cancellationHandlerCountForTesting == 0)
             }
         }
 

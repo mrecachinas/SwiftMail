@@ -15,6 +15,7 @@ extension IMAPServer {
     public func forceCloseConnection(token: IMAPNamedConnectionToken) {
         if let pending = pendingNamedConnections[token.name], pending.token == token {
             pendingNamedConnections.removeValue(forKey: token.name)
+            lifecycleState.unregister(pending.connection)
             pending.validity.invalidate()
             pending.connection.forceCloseTransport()
             let error = CancellationError()
@@ -24,6 +25,7 @@ extension IMAPServer {
 
         guard let entry = namedConnections[token.name], entry.token == token else { return }
         namedConnections.removeValue(forKey: token.name)
+        lifecycleState.unregister(entry.connection)
         entry.handle.validity.invalidate()
         entry.connection.forceCloseTransport()
     }
@@ -36,6 +38,7 @@ extension IMAPServer {
         pendingNamedConnections.removeAll()
         let error = CancellationError()
         for pending in pendingEntries.values {
+            lifecycleState.unregister(pending.connection)
             pending.validity.invalidate()
             pending.connection.forceCloseTransport()
             pending.waiters.forEach { $0.continuation.resume(throwing: error) }
@@ -46,6 +49,7 @@ extension IMAPServer {
     public func closeConnection(token: IMAPNamedConnectionToken) async {
         guard let entry = namedConnections[token.name], entry.token == token else { return }
         namedConnections.removeValue(forKey: token.name)
+        lifecycleState.unregister(entry.connection)
         entry.handle.validity.invalidate()
         try? await entry.connection.done()
         try? await entry.connection.disconnect()
@@ -64,6 +68,12 @@ extension IMAPServer {
      - Note: Logs connection attempts and capability retrieval at info level
      */
     public func connect() async throws {
+        let registrationEpoch = lifecycleState.captureRegistrationEpoch()
+        guard lifecycleState.register(
+            primaryConnection, registrationEpoch: registrationEpoch
+        ) else {
+            throw CancellationError()
+        }
         try await primaryConnection.connect()
     }
 
@@ -301,9 +311,15 @@ extension IMAPServer {
             throw IMAPError.commandFailed("Authentication required before creating a named connection")
         }
 
+        let registrationEpoch = lifecycleState.captureRegistrationEpoch()
         nextNamedConnectionGeneration &+= 1
         let token = IMAPNamedConnectionToken(name: normalizedName, generation: nextNamedConnectionGeneration)
-        let connection = makeNamedConnection(name: normalizedName)
+        let connection = makeNamedConnection(
+            name: normalizedName, registrationEpoch: registrationEpoch
+        )
+        guard lifecycleState.isCurrentRegistration(connection, epoch: registrationEpoch) else {
+            throw CancellationError()
+        }
         let validity = IMAPNamedConnectionValidity()
         pendingNamedConnections[normalizedName] = PendingNamedConnection(
             connection: connection, token: token, validity: validity, waiters: []
@@ -352,6 +368,7 @@ extension IMAPServer {
             } else {
                 pending = nil
             }
+            lifecycleState.unregister(connection)
             try? await connection.disconnect()
             pending?.waiters.forEach { $0.continuation.resume(throwing: error) }
             throw error
@@ -428,7 +445,12 @@ extension IMAPServer {
 
     // MARK: - Connection Management Helpers
 
-    func makeIdleConnection(sessionID: UUID, mailbox: String, group: EventLoopGroup) -> IMAPConnection {
+    func makeIdleConnection(
+        sessionID: UUID,
+        mailbox: String,
+        group: EventLoopGroup,
+        registrationEpoch: UInt64? = nil
+    ) -> IMAPConnection {
         let shortID = String(sessionID.uuidString.prefix(8))
         let suffix = "idle-\(shortID)"
         let sanitizedMailbox = mailbox
@@ -454,11 +476,14 @@ extension IMAPServer {
             responseBufferLimit: responseBufferLimit,
             parserLimits: parserLimits
         )
-        lifecycleState.register(connection)
+        _ = lifecycleState.register(connection, registrationEpoch: registrationEpoch)
         return connection
     }
 
-    func makeNamedConnection(name: String) -> IMAPConnection {
+    func makeNamedConnection(
+        name: String,
+        registrationEpoch: UInt64? = nil
+    ) -> IMAPConnection {
         let sanitizedName = sanitizedConnectionName(name)
         let suffix = "named-\(sanitizedName)"
         let shortID = String(sanitizedName.prefix(24))
@@ -482,7 +507,7 @@ extension IMAPServer {
             responseBufferLimit: responseBufferLimit,
             parserLimits: parserLimits
         )
-        lifecycleState.register(connection)
+        _ = lifecycleState.register(connection, registrationEpoch: registrationEpoch)
         return connection
     }
 
@@ -514,6 +539,7 @@ extension IMAPServer {
     /// lifecycle, which lets `disconnect()` and the session's own `done()`
     /// race safely; whichever loses the gate leaves cleanup to the winner.
     private func teardownIdleEntry(_ entry: IdleConnection) async {
+        lifecycleState.unregister(entry.connection)
         if let lifecycle = entry.lifecycle, let cycleTask = entry.cycleTask {
             guard await lifecycle.beginStop(cycleTask: cycleTask) else { return }
             try? await entry.connection.done()
@@ -556,18 +582,21 @@ extension IMAPServer {
         namedConnections.removeAll()
 
         for entry in idleEntries.values {
+            lifecycleState.unregister(entry.connection)
             entry.cycleTask?.cancel()
             entry.connection.forceCloseTransport()
         }
 
         let cancellationError = CancellationError()
         for pending in pendingEntries.values {
+            lifecycleState.unregister(pending.connection)
             pending.validity.invalidate()
             pending.connection.forceCloseTransport()
             pending.waiters.forEach { $0.continuation.resume(throwing: cancellationError) }
         }
 
         for entry in namedEntries.values {
+            lifecycleState.unregister(entry.connection)
             entry.handle.validity.invalidate()
             entry.connection.forceCloseTransport()
         }
@@ -587,5 +616,6 @@ extension IMAPServer {
         try? await primaryConnection.disconnect()
 
         clearMailboxState()
+        lifecycleState.finishSignOut()
     }
 }

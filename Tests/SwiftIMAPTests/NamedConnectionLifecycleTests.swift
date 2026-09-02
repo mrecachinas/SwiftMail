@@ -23,6 +23,50 @@ private actor PostOperationGate {
 @Suite(.serialized)
 struct NamedConnectionLifecycleTests {
     @Test
+    func concurrentRegistrationBarrierDoesNotEscapeSignOutSnapshot() async throws {
+        let state = IMAPServerLifecycleState()
+        let epoch = state.captureRegistrationEpoch()
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+
+        await withTaskGroup(of: Void.self) { tasks in
+            tasks.addTask { state.beginSignOut() }
+            for index in 0..<64 {
+                tasks.addTask {
+                    let connection = makeConnection(
+                        group: group, identifier: "barrier-\(index)"
+                    )
+                    _ = state.register(connection, registrationEpoch: epoch)
+                }
+            }
+        }
+
+        #expect(state.registeredConnectionCountForTesting == 0)
+        try? await group.shutdownGracefully()
+    }
+
+    @Test
+    func staleHandlerRegistrationIsCancelledAndRemoved() async throws {
+        let state = IMAPServerLifecycleState()
+        let epoch = state.captureRegistrationEpoch()
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let connection = makeConnection(group: group, identifier: "handler")
+        #expect(state.register(connection, registrationEpoch: epoch))
+        state.beginSignOut()
+
+        let cancelled = LockIsolated(false)
+        _ = state.registerCancellationHandler(
+            for: connection, registrationEpoch: epoch
+        ) {
+            cancelled.withLock { $0 = true }
+        }
+
+        #expect(cancelled.withLock { $0 })
+        #expect(state.registeredConnectionCountForTesting == 0)
+        #expect(state.cancellationHandlerCountForTesting == 0)
+        try? await group.shutdownGracefully()
+    }
+
+    @Test
     func forceCloseFailsPendingWaitersAndFencesTransport() async throws {
         let server = IMAPServer(host: "localhost", port: 1, useTLS: false)
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -178,13 +222,29 @@ struct NamedConnectionLifecycleTests {
         try? await replacementGroup.shutdownGracefully()
     }
 
-    private func makeConnection(group: EventLoopGroup) -> IMAPConnection {
+    private func makeConnection(
+        group: EventLoopGroup,
+        identifier: String = "lifecycle"
+    ) -> IMAPConnection {
         IMAPConnection(
             host: "localhost", port: 1, useTLS: false, group: group,
             loggerLabel: "test.lifecycle", outboundLabel: "test.lifecycle.out",
-            inboundLabel: "test.lifecycle.in", connectionID: "lifecycle",
+            inboundLabel: "test.lifecycle.in", connectionID: identifier,
             connectionRole: "test"
         )
+    }
+}
+
+private final class LockIsolated<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Value
+
+    init(_ value: Value) {
+        self.value = value
+    }
+
+    func withLock<T>(_ body: (inout Value) -> T) -> T {
+        lock.withLock { body(&value) }
     }
 }
 
