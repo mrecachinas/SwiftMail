@@ -16,6 +16,7 @@ extension IMAPServer {
         if let pending = pendingNamedConnections[token.name], pending.token == token {
             pendingNamedConnections.removeValue(forKey: token.name)
             lifecycleState.unregister(pending.connection)
+            lifecycleState.discardInvalidationHandler(for: pending.connection)
             pending.validity.invalidate()
             pending.connection.forceCloseTransport()
             let error = CancellationError()
@@ -26,6 +27,7 @@ extension IMAPServer {
         guard let entry = namedConnections[token.name], entry.token == token else { return }
         namedConnections.removeValue(forKey: token.name)
         lifecycleState.unregister(entry.connection)
+        lifecycleState.discardInvalidationHandler(for: entry.connection)
         entry.handle.validity.invalidate()
         entry.connection.forceCloseTransport()
     }
@@ -39,6 +41,7 @@ extension IMAPServer {
         let error = CancellationError()
         for pending in pendingEntries.values {
             lifecycleState.unregister(pending.connection)
+            lifecycleState.discardInvalidationHandler(for: pending.connection)
             pending.validity.invalidate()
             pending.connection.forceCloseTransport()
             pending.waiters.forEach { $0.continuation.resume(throwing: error) }
@@ -50,6 +53,7 @@ extension IMAPServer {
         guard let entry = namedConnections[token.name], entry.token == token else { return }
         namedConnections.removeValue(forKey: token.name)
         lifecycleState.unregister(entry.connection)
+        lifecycleState.discardInvalidationHandler(for: entry.connection)
         entry.handle.validity.invalidate()
         try? await entry.connection.done()
         try? await entry.connection.disconnect()
@@ -379,6 +383,7 @@ extension IMAPServer {
                 pending = nil
             }
             lifecycleState.unregister(connection)
+            lifecycleState.discardInvalidationHandler(for: connection)
             try? await connection.disconnect()
             pending?.waiters.forEach { $0.continuation.resume(throwing: error) }
             throw error
@@ -612,6 +617,7 @@ extension IMAPServer {
         let cancellationError = CancellationError()
         for pending in pendingEntries.values {
             lifecycleState.unregister(pending.connection)
+            lifecycleState.discardInvalidationHandler(for: pending.connection)
             pending.validity.invalidate()
             pending.connection.forceCloseTransport()
             pending.waiters.forEach { $0.continuation.resume(throwing: cancellationError) }
@@ -619,7 +625,10 @@ extension IMAPServer {
 
         for entry in namedEntries.values {
             lifecycleState.unregister(entry.connection)
-            entry.handle.validity.invalidate()
+            if clearAuthentication {
+                lifecycleState.discardInvalidationHandler(for: entry.connection)
+                entry.handle.validity.invalidate()
+            }
             entry.connection.forceCloseTransport()
         }
 

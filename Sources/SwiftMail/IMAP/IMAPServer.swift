@@ -87,7 +87,12 @@ final class IMAPServerLifecycleState: @unchecked Sendable {
             let id = ObjectIdentifier(connection)
             connections.removeValue(forKey: id)
             cancellationHandlers.removeValue(forKey: id)
-            invalidationHandlers.removeValue(forKey: id)
+        }
+    }
+
+    func discardInvalidationHandler(for connection: IMAPConnection) {
+        _ = lock.withLock {
+            invalidationHandlers.removeValue(forKey: ObjectIdentifier(connection))
         }
     }
 
