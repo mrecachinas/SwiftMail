@@ -190,6 +190,45 @@ import Testing
             }
         }
 
+        @Test
+        func beginSignOutClosesInactiveNamedAndResilientIdleBeforeCleanup() async throws {
+            let (testServer, tempRoot) = try makeTestServer()
+            try testServer.start()
+            defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+            try await testServer.run {
+                let server = IMAPServer(host: "127.0.0.1", port: testServer.port, useTLS: false)
+                try await server.connect()
+                try await server.login(username: "u", password: "p")
+                // Leave this cached named handle inactive while the IDLE runner
+                // is the only child context that can recover.
+                let named = try await server.connection(named: "cached")
+                let configuration = IMAPIdleConfiguration(
+                    renewalInterval: 60,
+                    noopInterval: 60,
+                    postIdleNoopEnabled: false,
+                    postIdleNoopDelay: 0,
+                    doneTimeout: 2,
+                    reconnectBaseDelay: 0.01,
+                    reconnectMaxDelay: 0.01,
+                    reconnectJitterFactor: 0
+                )
+                let session = try await server.idle(on: "INBOX", configuration: configuration)
+                #expect(try await waitForIdleCommandCount(testServer, atLeast: 1))
+                let connectionsBeforeSignOut = testServer.acceptedConnectionCount
+
+                // This call must fence credentials, cancel the resilient cycle,
+                // and force-close every child before the first async cleanup hop.
+                server.beginSignOut()
+                try await server.disconnect()
+                #expect(await waitForStreamFinish(session))
+                #expect(!(await named.isConnected))
+
+                try await Task.sleep(nanoseconds: 500_000_000)
+                #expect(testServer.acceptedConnectionCount == connectionsBeforeSignOut)
+            }
+        }
+
         /// Consumers end IDLE producers with `try? await session.done()` from a
         /// task that is itself already cancelled (Cocoanetics/Post#30's watch
         /// loops do exactly this). Teardown must complete regardless: the events

@@ -27,6 +27,68 @@ import OrderedCollections
 /// Maximum number of identifiers per IMAP FETCH command when chunking large sets.
 let defaultFetchChunkSize = 50
 
+/// Thread-safe lifecycle state shared by the server actor and synchronous
+/// cancellation entry points. The latter must fence replay and close every
+/// transport before an actor hop or an await.
+final class IMAPServerLifecycleState: @unchecked Sendable {
+    let replayEpoch = IMAPReplayEpoch()
+    private let lock = NSLock()
+    private var connections: [ObjectIdentifier: IMAPConnection] = [:]
+    private var cancellationHandlers: [ObjectIdentifier: @Sendable () -> Void] = [:]
+
+    func register(_ connection: IMAPConnection) {
+        lock.withLock { connections[ObjectIdentifier(connection)] = connection }
+    }
+
+    func registerCancellationHandler(
+        for connection: IMAPConnection,
+        _ handler: @escaping @Sendable () -> Void
+    ) {
+        lock.withLock {
+            let id = ObjectIdentifier(connection)
+            connections[id] = connection
+            cancellationHandlers[id] = handler
+        }
+    }
+
+    func forceCloseAll() {
+        let snapshot = lock.withLock {
+            (Array(connections.values), Array(cancellationHandlers.values))
+        }
+        snapshot.1.forEach { $0() }
+        snapshot.0.forEach { $0.forceCloseTransport() }
+    }
+
+    func beginSignOut() {
+        replayEpoch.invalidate()
+        forceCloseAll()
+    }
+
+    func invalidateAuthenticationGenerations() {
+        let snapshot = lock.withLock { Array(connections.values) }
+        snapshot.forEach { $0.invalidateAuthenticationGeneration() }
+    }
+}
+
+final class IMAPReplayEpoch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: UInt64 = 0
+
+    func capture() -> UInt64 {
+        lock.withLock { value }
+    }
+
+    func invalidate() {
+        lock.withLock { value &+= 1 }
+    }
+
+    func check(_ expected: UInt64) throws {
+        guard lock.withLock({ value == expected }) else {
+            throw CancellationError()
+        }
+    }
+}
+
 public actor IMAPServer {
     // MARK: - Properties
 
@@ -55,6 +117,7 @@ public actor IMAPServer {
 
     /** The event loop group for handling asynchronous operations */
     let group: EventLoopGroup
+    let lifecycleState: IMAPServerLifecycleState
 
     /// Primary connection used for non-IDLE commands.
     let primaryConnection: IMAPConnection
@@ -159,11 +222,26 @@ public actor IMAPServer {
     struct Authentication {
         let method: AuthenticationMethod
         var identification: Identification?
+        let replayEpoch: UInt64
+        let replayFence: IMAPReplayEpoch
+
+        init(
+            method: AuthenticationMethod,
+            identification: Identification?,
+            replayEpoch: UInt64? = nil,
+            replayFence: IMAPReplayEpoch? = nil
+        ) {
+            self.method = method
+            self.identification = identification
+            self.replayFence = replayFence ?? IMAPReplayEpoch()
+            self.replayEpoch = replayEpoch ?? self.replayFence.capture()
+        }
 
         func authenticate(
             on connection: IMAPConnection,
             authenticationGeneration: Int? = nil
         ) async throws {
+            try replayFence.check(replayEpoch)
             switch method {
                 case .login(let username, let password):
                     try await connection.login(
@@ -176,12 +254,15 @@ public actor IMAPServer {
                         authenticationGeneration: authenticationGeneration
                     )
                 case .xoauth2(let email, let accessTokenProvider):
+                    try replayFence.check(replayEpoch)
                     let accessToken = try await accessTokenProvider()
+                    try replayFence.check(replayEpoch)
                     try await connection.authenticateXOAUTH2(
                         email: email, accessToken: accessToken,
                         authenticationGeneration: authenticationGeneration
                     )
             }
+            try replayFence.check(replayEpoch)
             // RFC 2971: some servers (e.g. NetEase 163/126) reject SELECT on any
             // authenticated connection that has not identified itself, so the
             // stored identity is replayed after every authentication.
@@ -276,6 +357,7 @@ public actor IMAPServer {
         self.responseBufferLimit = responseBufferLimit
         self.parserLimits = parserLimits
         self.group = MultiThreadedEventLoopGroup(numberOfThreads: numberOfThreads)
+        self.lifecycleState = IMAPServerLifecycleState()
 
         // Initialize loggers
         self.logger = Logging.Logger(label: "com.cocoanetics.SwiftMail.IMAPServer")
@@ -298,6 +380,7 @@ public actor IMAPServer {
             responseBufferLimit: responseBufferLimit,
             parserLimits: parserLimits
         )
+        lifecycleState.register(primaryConnection)
     }
 
     public init(

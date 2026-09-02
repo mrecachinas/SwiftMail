@@ -164,6 +164,9 @@ extension IMAPServer {
             await IMAPResilientIdleRunner.run(context: context)
             continuation.finish()
         }
+        lifecycleState.registerCancellationHandler(for: connection) {
+            cycleTask.cancel()
+        }
 
         if idleConnections[sessionID] != nil {
             idleConnections[sessionID]?.lifecycle = lifecycle

@@ -186,7 +186,9 @@ extension IMAPServer {
     ) {
         authentication = Authentication(
             method: .xoauth2(email: email, accessTokenProvider: accessTokenProvider),
-            identification: clientIdentification
+            identification: clientIdentification,
+            replayEpoch: lifecycleState.replayEpoch.capture(),
+            replayFence: lifecycleState.replayEpoch
         )
     }
 
@@ -215,7 +217,12 @@ extension IMAPServer {
         // suspend between the validation and assignment, so sign-out cannot
         // leave a stale credential replay after the authentication await.
         try primaryConnection.checkAuthenticationGeneration(generation)
-        authentication = value
+        authentication = Authentication(
+            method: value.method,
+            identification: value.identification,
+            replayEpoch: lifecycleState.replayEpoch.capture(),
+            replayFence: lifecycleState.replayEpoch
+        )
     }
 
     /// RFC 2971 replay for the primary connection's explicit authentication
@@ -402,7 +409,21 @@ extension IMAPServer {
     /// graceful close separately.
     public func clearReplayCredentials() {
         authentication = nil
-        primaryConnection.invalidateAuthenticationGeneration()
+        lifecycleState.replayEpoch.invalidate()
+        lifecycleState.invalidateAuthenticationGenerations()
+    }
+
+    /// Synchronously fences replay credentials and force-closes every transport.
+    /// This is intentionally non-async so callers can start sign-out before
+    /// yielding to actor cleanup or waiting for a stalled command.
+    public nonisolated func beginSignOut() {
+        lifecycleState.beginSignOut()
+    }
+
+    /// Synchronously force-closes every primary, named, pending, and IDLE
+    /// transport. Use ``beginSignOut()`` when credentials must also be fenced.
+    public nonisolated func forceCloseAll() {
+        lifecycleState.forceCloseAll()
     }
 
     // MARK: - Connection Management Helpers
@@ -418,7 +439,7 @@ extension IMAPServer {
         let outboundLabel = "com.cocoanetics.SwiftMail.IMAP_OUT.\(suffix)"
         let inboundLabel = "com.cocoanetics.SwiftMail.IMAP_IN.\(suffix)"
 
-        return IMAPConnection(
+        let connection = IMAPConnection(
             host: host,
             port: port,
             transportSecurity: transportSecurity,
@@ -433,6 +454,8 @@ extension IMAPServer {
             responseBufferLimit: responseBufferLimit,
             parserLimits: parserLimits
         )
+        lifecycleState.register(connection)
+        return connection
     }
 
     func makeNamedConnection(name: String) -> IMAPConnection {
@@ -444,7 +467,7 @@ extension IMAPServer {
         let outboundLabel = "com.cocoanetics.SwiftMail.IMAP_OUT.\(suffix)"
         let inboundLabel = "com.cocoanetics.SwiftMail.IMAP_IN.\(suffix)"
 
-        return IMAPConnection(
+        let connection = IMAPConnection(
             host: host,
             port: port,
             transportSecurity: transportSecurity,
@@ -459,6 +482,8 @@ extension IMAPServer {
             responseBufferLimit: responseBufferLimit,
             parserLimits: parserLimits
         )
+        lifecycleState.register(connection)
+        return connection
     }
 
     func sanitizedConnectionName(_ name: String) -> String {
@@ -514,7 +539,8 @@ extension IMAPServer {
         if clearAuthentication {
             // Fence replay publication before any teardown await.
             authentication = nil
-            primaryConnection.invalidateAuthenticationGeneration()
+            lifecycleState.replayEpoch.invalidate()
+            lifecycleState.invalidateAuthenticationGenerations()
         }
 
         // Snapshot and evict every entry first. Cancellation and force-close

@@ -129,6 +129,42 @@ struct AuthenticationGenerationFenceTests {
         #expect(await server.authentication == nil)
     }
 
+    #if os(macOS)
+        @Test
+        func retainedNamedHandleCannotReplayCredentialsAfterClear() async throws {
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("swiftmail-replay-\(UUID().uuidString)")
+            let maildir = root.appendingPathComponent("Maildir")
+            try FileManager.default.createDirectory(
+                at: maildir.appendingPathComponent("cur"), withIntermediateDirectories: true
+            )
+            try FileManager.default.createDirectory(
+                at: maildir.appendingPathComponent("new"), withIntermediateDirectories: true
+            )
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let testServer = try IMAPTestServer(
+                host: "localhost", port: 0, username: "u", password: "p", maildirURL: maildir
+            )
+            try testServer.start()
+            try await testServer.run {
+                let server = IMAPServer(host: "127.0.0.1", port: testServer.port, useTLS: false)
+                try await server.connect()
+                try await server.login(username: "u", password: "p")
+                let handle = try await server.connection(named: "cached")
+
+                await server.clearReplayCredentials()
+                do {
+                    try await handle.connect()
+                    Issue.record("a retained handle must not replay cleared credentials")
+                } catch {
+                    #expect(error is CancellationError || error is IMAPError)
+                }
+                try? await server.disconnect()
+            }
+        }
+    #endif
+
     @Test
     func failedLogoutStillClearsReplayCredentialsAndClosesTransport() async throws {
         let server = IMAPServer(host: "127.0.0.1", port: 1, useTLS: false)
