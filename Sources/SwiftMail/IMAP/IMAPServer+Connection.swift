@@ -301,6 +301,9 @@ extension IMAPServer {
             ), lifecycleState.isCurrentRegistration(existing.connection, epoch: registrationEpoch) else {
                 throw CancellationError()
             }
+            lifecycleState.registerInvalidationHandler(for: existing.connection) {
+                existing.handle.validity.invalidate()
+            }
             return existing.handle
         }
 
@@ -606,7 +609,11 @@ extension IMAPServer {
         pendingNamedConnections.removeAll()
 
         let namedEntries = namedConnections
-        namedConnections.removeAll()
+        // A normal disconnect closes transports but keeps named leases reusable.
+        // Logout/sign-out invalidates and evicts them instead.
+        if clearAuthentication {
+            namedConnections.removeAll()
+        }
 
         for entry in idleEntries.values {
             lifecycleState.unregister(entry.connection)
@@ -626,12 +633,12 @@ extension IMAPServer {
         for entry in namedEntries.values {
             lifecycleState.unregister(entry.connection)
             if clearAuthentication {
-                lifecycleState.discardInvalidationHandler(for: entry.connection)
                 entry.handle.validity.invalidate()
             }
             entry.connection.forceCloseTransport()
         }
 
+        lifecycleState.unregister(primaryConnection)
         primaryConnection.forceCloseTransport()
 
         // All transports are fenced/closed above. The remaining awaits only

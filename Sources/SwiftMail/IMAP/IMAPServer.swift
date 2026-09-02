@@ -87,6 +87,7 @@ final class IMAPServerLifecycleState: @unchecked Sendable {
             let id = ObjectIdentifier(connection)
             connections.removeValue(forKey: id)
             cancellationHandlers.removeValue(forKey: id)
+            invalidationHandlers.removeValue(forKey: id)
         }
     }
 
@@ -211,6 +212,10 @@ final class IMAPServerLifecycleState: @unchecked Sendable {
 
     var cancellationHandlerCountForTesting: Int {
         lock.withLock { cancellationHandlers.count }
+    }
+
+    var invalidationHandlerCountForTesting: Int {
+        lock.withLock { invalidationHandlers.count }
     }
 }
 

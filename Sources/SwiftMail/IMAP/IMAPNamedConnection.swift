@@ -80,6 +80,9 @@ public actor IMAPNamedConnection {
                 validity.invalidate()
                 throw CancellationError()
             }
+            lifecycleState.registerInvalidationHandler(for: connection) { [validity] in
+                validity.invalidate()
+            }
         }
         let startup = try validity.bind(to: connection, token: token)
         do {

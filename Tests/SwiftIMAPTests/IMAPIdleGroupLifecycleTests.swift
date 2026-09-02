@@ -157,7 +157,7 @@ import Testing
                 // A redundant done() after disconnect must be safe and idempotent.
                 try? await session.done()
                 let counts = await server.lifecycleCountsForTesting()
-                #expect(counts.connections == 1)
+                #expect(counts.connections == 0)
                 #expect(counts.handlers == 0)
             }
         }
@@ -281,7 +281,7 @@ import Testing
 
                 try? await server.disconnect()
                 let counts = await server.lifecycleCountsForTesting()
-                #expect(counts.connections == 1)
+                #expect(counts.connections == 0)
                 #expect(counts.handlers == 0)
             }
         }

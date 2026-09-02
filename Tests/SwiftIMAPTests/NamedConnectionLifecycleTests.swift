@@ -180,6 +180,49 @@ struct NamedConnectionLifecycleTests {
         try? await group.shutdownGracefully()
     }
 
+    #if os(macOS)
+        @Test
+        func cachedReconnectIsClosedByTheNextDisconnect() async throws {
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("swiftmail-cached-reconnect-\(UUID().uuidString)")
+            let maildir = root.appendingPathComponent("Maildir")
+            try FileManager.default.createDirectory(
+                at: maildir.appendingPathComponent("cur"), withIntermediateDirectories: true
+            )
+            try FileManager.default.createDirectory(
+                at: maildir.appendingPathComponent("new"), withIntermediateDirectories: true
+            )
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let testServer = try IMAPTestServer(
+                host: "localhost", port: 0, username: "u", password: "p", maildirURL: maildir
+            )
+            try testServer.start()
+            try await testServer.run {
+                let server = IMAPServer(host: "127.0.0.1", port: testServer.port, useTLS: false)
+                try await server.connect()
+                try await server.login(username: "u", password: "p")
+
+                let initial = try await server.connection(named: "cached")
+                try await server.disconnect()
+                #expect(!(await initial.isConnected))
+                #expect(await server.namedConnections["cached"] != nil)
+
+                let cached = try await server.connection(named: "cached")
+                #expect(ObjectIdentifier(initial) == ObjectIdentifier(cached))
+                try await cached.connect()
+                #expect(await cached.isConnected)
+
+                try await server.disconnect()
+                let counts = await server.lifecycleCountsForTesting()
+                #expect(!(await cached.isConnected))
+                #expect(counts.connections == 0)
+                #expect(counts.handlers == 0)
+                #expect(counts.invalidationHandlers == 0)
+            }
+        }
+    #endif
+
     @Test
     func forceCloseFailsPendingWaitersAndFencesTransport() async throws {
         let server = IMAPServer(host: "localhost", port: 1, useTLS: false)
@@ -364,10 +407,13 @@ private final class LockIsolated<Value>: @unchecked Sendable {
 }
 
 extension IMAPServer {
-    func lifecycleCountsForTesting() -> (connections: Int, handlers: Int) {
+    func lifecycleCountsForTesting() -> (
+        connections: Int, handlers: Int, invalidationHandlers: Int
+    ) {
         (
             lifecycleState.registeredConnectionCountForTesting,
-            lifecycleState.cancellationHandlerCountForTesting
+            lifecycleState.cancellationHandlerCountForTesting,
+            lifecycleState.invalidationHandlerCountForTesting
         )
     }
 
