@@ -497,9 +497,12 @@ extension IMAPServer {
             responseBufferLimit: responseBufferLimit,
             parserLimits: parserLimits
         )
-        connection.setLifecyclePreparation { [lifecycleState, connection] in
-            try lifecycleState.prepareRegistration(for: connection) {
-                connection.forceCloseTransport()
+        connection.setLifecyclePreparation { [weak lifecycleState, weak connection] in
+            guard let lifecycleState, let connection else {
+                throw CancellationError()
+            }
+            return try lifecycleState.prepareRegistrationAndCaptureTransport(for: connection) { [weak connection] in
+                connection?.forceCloseTransport()
             }
         }
         return connection

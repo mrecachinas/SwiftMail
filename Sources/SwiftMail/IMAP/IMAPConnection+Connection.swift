@@ -47,7 +47,7 @@ extension IMAPConnection {
             try checkAuthenticationGeneration(authenticationGeneration)
         }
         // Establish the lifecycle fence before opening a socket.
-        try prepareLifecycleForTransport()
+        let lifecycleToken = try prepareLifecycleForTransport()
         clearInvalidChannel()
         if channel?.isActive == true {
             logger.debug("\(connectionContext) connect requested while channel is already active")
@@ -60,7 +60,7 @@ extension IMAPConnection {
         idleTerminationInProgress = false
 
         let tlsTransportMode = try Self.resolveTLSTransportMode(port: port, transportSecurity: transportSecurity)
-        let generation = expectedGeneration ?? captureTransportGeneration()
+        let generation = expectedGeneration ?? lifecycleToken.transportGeneration
         let greetingPromise = group.next().makePromise(of: [Capability].self)
         let greetingHandler = IMAPGreetingHandler(commandTag: "", promise: greetingPromise)
 
@@ -80,7 +80,8 @@ extension IMAPConnection {
             try checkAuthenticationGeneration(authenticationGeneration)
         }
 
-        guard publishChannelIfCurrent(channel, generation: generation) else {
+        guard lifecycleToken.transportGeneration == generation,
+              publishChannelIfCurrent(channel, token: lifecycleToken) else {
             throw CancellationError()
         }
         published = true

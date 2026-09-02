@@ -1,5 +1,6 @@
 import Foundation
 import NIO
+import NIOEmbedded
 import Testing
 @testable import SwiftMail
 
@@ -130,6 +131,67 @@ struct NamedConnectionLifecycleTests {
             #expect(error is CancellationError || error is IMAPError)
         }
         state.finishSignOut(signOutGeneration)
+        try? await group.shutdownGracefully()
+    }
+
+    @Test
+    func signOutAfterLifecycleCaptureCannotPublishReplacementChannel() async throws {
+        let state = IMAPServerLifecycleState()
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let connection = makeConnection(group: group, identifier: "capture-barrier")
+        let token = try state.prepareRegistrationAndCaptureTransport(for: connection) { }
+        let signOutGeneration = state.beginSignOut()
+        let channel = EmbeddedChannel()
+
+        #expect(!connection.publishChannelIfCurrent(channel, token: token))
+        #expect(connection.channel == nil)
+        channel.close(promise: nil)
+        state.finishSignOut(signOutGeneration)
+        try? await group.shutdownGracefully()
+    }
+
+    @Test
+    func lifecyclePreparationCallbackDoesNotRetainConnection() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        weak var weakConnection: IMAPConnection?
+        do {
+            var connection: IMAPConnection? = makeConnection(
+                group: group, identifier: "weak-preparation"
+            )
+            weakConnection = connection
+            connection?.setLifecyclePreparation { [weak connection] in
+                guard let connection else { throw CancellationError() }
+                return IMAPTransportLifecycleToken(
+                    transportGeneration: connection.captureTransportGeneration()
+                )
+            }
+            connection = nil
+        }
+        #expect(weakConnection == nil)
+        try? await group.shutdownGracefully()
+    }
+
+    @Test
+    func lifecyclePreparationStorageSupportsConcurrentReconnectAccess() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let connection = makeConnection(group: group, identifier: "concurrent-preparation")
+
+        await withTaskGroup(of: Void.self) { tasks in
+            for index in 0..<128 {
+                tasks.addTask {
+                    connection.setLifecyclePreparation { [weak connection] in
+                        guard let connection else { throw CancellationError() }
+                        return IMAPTransportLifecycleToken(
+                            transportGeneration: connection.captureTransportGeneration(),
+                            lifecycleEpoch: UInt64(index)
+                        )
+                    }
+                    _ = try? connection.prepareLifecycleForTransport()
+                }
+            }
+        }
+
+        #expect(connection.captureTransportGeneration() == 0)
         try? await group.shutdownGracefully()
     }
 

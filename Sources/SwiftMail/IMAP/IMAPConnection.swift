@@ -17,6 +17,37 @@ final class IMAPTransportState: @unchecked Sendable {
     var authenticationGeneration = 0
 }
 
+/// A lifecycle and transport generation captured as one barrier.
+final class IMAPTransportLifecycleToken: @unchecked Sendable {
+    let transportGeneration: Int
+    let lifecycleEpoch: UInt64?
+    weak var lifecycleState: IMAPServerLifecycleState?
+
+    init(
+        transportGeneration: Int,
+        lifecycleEpoch: UInt64? = nil,
+        lifecycleState: IMAPServerLifecycleState? = nil
+    ) {
+        self.transportGeneration = transportGeneration
+        self.lifecycleEpoch = lifecycleEpoch
+        self.lifecycleState = lifecycleState
+    }
+
+    func publishChannelIfCurrent(_ channel: Channel, connection: IMAPConnection) -> Bool {
+        guard let lifecycleState else {
+            guard lifecycleEpoch == nil else { return false }
+            return connection.transportState.lock.withLock {
+                guard connection.transportState.generation == transportGeneration else { return false }
+                connection.transportState.channel = channel
+                return true
+            }
+        }
+        return lifecycleState.publishChannelIfCurrent(
+            channel, connection: connection, token: self
+        )
+    }
+}
+
 /// Internal connection wrapper used by IMAPServer to manage per-connection state.
 final class IMAPConnection {
     enum TLSTransportMode: Equatable {
@@ -38,7 +69,7 @@ final class IMAPConnection {
     let connectionRole: String
     let connectionContext: String
     let transportState = IMAPTransportState()
-    private var lifecyclePreparation: (@Sendable () throws -> Void)?
+    private var lifecyclePreparation: (@Sendable () throws -> IMAPTransportLifecycleToken)?
     var channel: Channel? {
         get { transportState.lock.withLock { transportState.channel } }
         set { transportState.lock.withLock { transportState.channel = newValue } }
@@ -131,22 +162,22 @@ final class IMAPConnection {
         }
     }
 
-    func publishChannelIfCurrent(_ channel: Channel, generation: Int) -> Bool {
-        transportState.lock.lock()
-        defer { transportState.lock.unlock() }
-        guard transportState.generation == generation else {
-            return false
+    func publishChannelIfCurrent(_ channel: Channel, token: IMAPTransportLifecycleToken) -> Bool {
+        token.publishChannelIfCurrent(channel, connection: self)
+    }
+
+    func setLifecyclePreparation(
+        _ preparation: @escaping @Sendable () throws -> IMAPTransportLifecycleToken
+    ) {
+        transportState.lock.withLock {
+            lifecyclePreparation = preparation
         }
-        transportState.channel = channel
-        return true
     }
 
-    func setLifecyclePreparation(_ preparation: @escaping @Sendable () throws -> Void) {
-        lifecyclePreparation = preparation
-    }
-
-    func prepareLifecycleForTransport() throws {
-        try lifecyclePreparation?()
+    func prepareLifecycleForTransport() throws -> IMAPTransportLifecycleToken {
+        let preparation = transportState.lock.withLock { lifecyclePreparation }
+        return try preparation?()
+            ?? IMAPTransportLifecycleToken(transportGeneration: captureTransportGeneration())
     }
 
     /// - Note: `minimumTLSVersion` and `parserLimits` deliberately have **no defaults.**

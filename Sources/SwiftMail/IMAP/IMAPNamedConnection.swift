@@ -201,27 +201,24 @@ public actor IMAPNamedConnection {
             throw CancellationError()
         }
 
-        let leaseConnection = connection
         let leaseToken = token
-        connection.setLifecyclePreparation { [weak lifecycleState, weak leaseValidity, leaseConnection, leaseToken] in
-            guard let lifecycleState, let leaseValidity else {
+        connection.setLifecyclePreparation { [weak lifecycleState, weak leaseValidity, weak connection] in
+            guard let lifecycleState, let leaseValidity, let connection else {
                 throw CancellationError()
             }
-            _ = try leaseValidity.bind(to: leaseConnection, token: leaseToken)
-            let epoch = lifecycleState.captureRegistrationEpoch()
-            guard lifecycleState.register(leaseConnection, registrationEpoch: epoch),
-                  lifecycleState.isCurrentRegistration(leaseConnection, epoch: epoch) else {
-                lifecycleState.unregister(leaseConnection)
+            _ = try leaseValidity.bind(to: connection, token: leaseToken)
+            let transportToken = try lifecycleState.prepareRegistrationAndCaptureTransport(
+                for: connection
+            ) { [weak connection, weak leaseValidity] in
+                leaseValidity?.invalidate()
+                connection?.forceCloseTransport()
+            }
+            guard leaseValidity.isValid else {
+                lifecycleState.unregister(connection)
                 leaseValidity.invalidate()
                 throw CancellationError()
             }
-            guard lifecycleState.registerInvalidationHandler(for: leaseConnection, {
-                leaseValidity.invalidate()
-            }) else {
-                lifecycleState.unregister(leaseConnection)
-                leaseValidity.invalidate()
-                throw CancellationError()
-            }
+            return transportToken
         }
         return startup
     }

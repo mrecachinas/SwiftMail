@@ -136,6 +136,53 @@ final class IMAPServerLifecycleState: @unchecked Sendable {
         }
     }
 
+    /// Register a transport and capture its generation while holding the
+    /// lifecycle lock. Sign-out cannot invalidate the registration between
+    /// validation and the transport-generation capture.
+    func prepareRegistrationAndCaptureTransport(
+        for connection: IMAPConnection,
+        _ invalidationHandler: @escaping @Sendable () -> Void
+    ) throws -> IMAPTransportLifecycleToken {
+        lock.lock()
+        defer { lock.unlock() }
+        let id = ObjectIdentifier(connection)
+        guard !signingOut, closingGenerations.isEmpty else {
+            connection.forceCloseTransport()
+            throw CancellationError()
+        }
+        connections[id] = connection
+        invalidationHandlers[id] = invalidationHandler
+        connection.transportState.lock.lock()
+        let generation = connection.transportState.generation
+        connection.transportState.lock.unlock()
+        return IMAPTransportLifecycleToken(
+            transportGeneration: generation,
+            lifecycleEpoch: registrationEpoch,
+            lifecycleState: self
+        )
+    }
+
+    func publishChannelIfCurrent(
+        _ channel: Channel,
+        connection: IMAPConnection,
+        token: IMAPTransportLifecycleToken
+    ) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !signingOut, closingGenerations.isEmpty,
+              token.lifecycleEpoch == registrationEpoch,
+              connections[ObjectIdentifier(connection)] === connection else {
+            return false
+        }
+        connection.transportState.lock.lock()
+        defer { connection.transportState.lock.unlock() }
+        guard connection.transportState.generation == token.transportGeneration else {
+            return false
+        }
+        connection.transportState.channel = channel
+        return true
+    }
+
     func beginClosing() -> UInt64 {
         lock.withLock {
             registrationEpoch &+= 1
@@ -546,9 +593,12 @@ public actor IMAPServer {
             parserLimits: parserLimits
         )
         self.primaryConnection = primaryConnection
-        primaryConnection.setLifecyclePreparation { [lifecycleState, primaryConnection] in
-            try lifecycleState.prepareRegistration(for: primaryConnection) {
-                primaryConnection.forceCloseTransport()
+        primaryConnection.setLifecyclePreparation { [weak lifecycleState, weak primaryConnection] in
+            guard let lifecycleState, let primaryConnection else {
+                throw CancellationError()
+            }
+            return try lifecycleState.prepareRegistrationAndCaptureTransport(for: primaryConnection) { [weak primaryConnection] in
+                primaryConnection?.forceCloseTransport()
             }
         }
         lifecycleState.register(primaryConnection)
