@@ -38,6 +38,7 @@ final class IMAPConnection {
     let connectionRole: String
     let connectionContext: String
     let transportState = IMAPTransportState()
+    private var lifecyclePreparation: (@Sendable () throws -> Void)?
     var channel: Channel? {
         get { transportState.lock.withLock { transportState.channel } }
         set { transportState.lock.withLock { transportState.channel = newValue } }
@@ -138,6 +139,14 @@ final class IMAPConnection {
         }
         transportState.channel = channel
         return true
+    }
+
+    func setLifecyclePreparation(_ preparation: @escaping @Sendable () throws -> Void) {
+        lifecyclePreparation = preparation
+    }
+
+    func prepareLifecycleForTransport() throws {
+        try lifecyclePreparation?()
     }
 
     /// - Note: `minimumTLSVersion` and `parserLimits` deliberately have **no defaults.**

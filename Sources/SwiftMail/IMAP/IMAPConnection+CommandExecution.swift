@@ -121,6 +121,8 @@ extension IMAPConnection {
         if let authenticationGeneration {
             try checkAuthenticationGeneration(authenticationGeneration)
         }
+        // Commands transparently reconnect when their channel is gone.
+        try prepareLifecycleForTransport()
         try await waitForIdleCompletionIfNeeded()
         try await recycleConnectionIfBufferedTerminationIfNeeded(operation: String(describing: CommandType.self))
 
@@ -273,6 +275,7 @@ extension IMAPConnection {
         clearInvalidChannel()
 
         if self.channel == nil {
+            try prepareLifecycleForTransport()
             logger.info("\(connectionContext) Channel is nil, re-establishing connection before executing handler")
             try await connectBody()
         }

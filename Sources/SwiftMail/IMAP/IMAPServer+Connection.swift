@@ -295,14 +295,11 @@ extension IMAPServer {
         }
 
         if let existing = namedConnections[normalizedName] {
-            let registrationEpoch = lifecycleState.captureRegistrationEpoch()
-            guard lifecycleState.register(
-                existing.connection, registrationEpoch: registrationEpoch
-            ), lifecycleState.isCurrentRegistration(existing.connection, epoch: registrationEpoch) else {
-                throw CancellationError()
-            }
-            lifecycleState.registerInvalidationHandler(for: existing.connection) {
-                existing.handle.validity.invalidate()
+            guard existing.handle.validity.isValid else {
+                namedConnections.removeValue(forKey: normalizedName)
+                lifecycleState.unregister(existing.connection)
+                existing.connection.forceCloseTransport()
+                return try await connection(named: normalizedName)
             }
             return existing.handle
         }
@@ -324,19 +321,12 @@ extension IMAPServer {
             throw IMAPError.commandFailed("Authentication required before creating a named connection")
         }
 
-        let registrationEpoch = lifecycleState.captureRegistrationEpoch()
         nextNamedConnectionGeneration &+= 1
         let token = IMAPNamedConnectionToken(name: normalizedName, generation: nextNamedConnectionGeneration)
         let connection = makeNamedConnection(
-            name: normalizedName, registrationEpoch: registrationEpoch
+            name: normalizedName
         )
-        guard lifecycleState.isCurrentRegistration(connection, epoch: registrationEpoch) else {
-            throw CancellationError()
-        }
         let validity = IMAPNamedConnectionValidity()
-        lifecycleState.registerInvalidationHandler(for: connection) {
-            validity.invalidate()
-        }
         pendingNamedConnections[normalizedName] = PendingNamedConnection(
             connection: connection, token: token, validity: validity, waiters: []
         )
@@ -501,7 +491,11 @@ extension IMAPServer {
             responseBufferLimit: responseBufferLimit,
             parserLimits: parserLimits
         )
-        _ = lifecycleState.register(connection, registrationEpoch: registrationEpoch)
+        connection.setLifecyclePreparation { [lifecycleState, connection] in
+            try lifecycleState.prepareRegistration(for: connection) {
+                connection.forceCloseTransport()
+            }
+        }
         return connection
     }
 
@@ -532,7 +526,6 @@ extension IMAPServer {
             responseBufferLimit: responseBufferLimit,
             parserLimits: parserLimits
         )
-        _ = lifecycleState.register(connection, registrationEpoch: registrationEpoch)
         return connection
     }
 

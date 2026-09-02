@@ -97,10 +97,11 @@ final class IMAPServerLifecycleState: @unchecked Sendable {
         }
     }
 
+    @discardableResult
     func registerInvalidationHandler(
         for connection: IMAPConnection,
         _ handler: @escaping @Sendable () -> Void
-    ) {
+    ) -> Bool {
         let accepted = lock.withLock {
             let id = ObjectIdentifier(connection)
             guard connections[id] != nil, !signingOut, closingGenerations.isEmpty else {
@@ -112,12 +113,26 @@ final class IMAPServerLifecycleState: @unchecked Sendable {
         if !accepted {
             handler()
         }
+        return accepted
     }
 
     func isCurrentRegistration(_ connection: IMAPConnection, epoch: UInt64) -> Bool {
         lock.withLock {
             !signingOut && closingGenerations.isEmpty && registrationEpoch == epoch
                 && connections[ObjectIdentifier(connection)] != nil
+        }
+    }
+
+    func prepareRegistration(
+        for connection: IMAPConnection,
+        _ invalidationHandler: @escaping @Sendable () -> Void
+    ) throws {
+        let epoch = captureRegistrationEpoch()
+        guard register(connection, registrationEpoch: epoch),
+              isCurrentRegistration(connection, epoch: epoch),
+              registerInvalidationHandler(for: connection, invalidationHandler) else {
+            unregister(connection)
+            throw CancellationError()
         }
     }
 
@@ -506,7 +521,8 @@ public actor IMAPServer {
         self.responseBufferLimit = responseBufferLimit
         self.parserLimits = parserLimits
         self.group = MultiThreadedEventLoopGroup(numberOfThreads: numberOfThreads)
-        self.lifecycleState = IMAPServerLifecycleState()
+        let lifecycleState = IMAPServerLifecycleState()
+        self.lifecycleState = lifecycleState
 
         // Initialize loggers
         self.logger = Logging.Logger(label: "com.cocoanetics.SwiftMail.IMAPServer")
@@ -514,7 +530,7 @@ public actor IMAPServer {
         let primaryLoggerLabel = "com.cocoanetics.SwiftMail.IMAPServer"
         let outboundLabel = "com.cocoanetics.SwiftMail.IMAP_OUT"
         let inboundLabel = "com.cocoanetics.SwiftMail.IMAP_IN"
-        self.primaryConnection = IMAPConnection(
+        let primaryConnection = IMAPConnection(
             host: host,
             port: port,
             transportSecurity: transportSecurity,
@@ -529,6 +545,12 @@ public actor IMAPServer {
             responseBufferLimit: responseBufferLimit,
             parserLimits: parserLimits
         )
+        self.primaryConnection = primaryConnection
+        primaryConnection.setLifecyclePreparation { [lifecycleState, primaryConnection] in
+            try lifecycleState.prepareRegistration(for: primaryConnection) {
+                primaryConnection.forceCloseTransport()
+            }
+        }
         lifecycleState.register(primaryConnection)
     }
 

@@ -134,6 +134,49 @@ struct NamedConnectionLifecycleTests {
     }
 
     @Test
+    func invalidRetainedHandleDoesNotRepopulateLifecycleRegistry() async throws {
+        let state = IMAPServerLifecycleState()
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let connection = makeConnection(group: group, identifier: "invalid-retained")
+        let validity = IMAPNamedConnectionValidity()
+        validity.invalidate()
+        let handle = IMAPNamedConnection(
+            name: "invalid-retained",
+            connection: connection,
+            token: IMAPNamedConnectionToken(name: "invalid-retained", generation: 1),
+            validity: validity,
+            authenticateOnConnection: { _ in },
+            lifecycleState: state
+        )
+
+        do {
+            try await handle.connect()
+            Issue.record("an invalid retained handle must not reconnect")
+        } catch {
+            #expect(error is IMAPError)
+        }
+        #expect(state.registeredConnectionCountForTesting == 0)
+        #expect(state.invalidationHandlerCountForTesting == 0)
+        try? await group.shutdownGracefully()
+    }
+
+    @Test
+    func directCommandTransparentReconnectIsFencedBySignOut() async throws {
+        let server = IMAPServer(host: "localhost", port: 1, useTLS: false)
+        server.beginSignOut()
+
+        do {
+            _ = try await server.fetchCapabilities()
+            Issue.record("a direct transparent reconnect must be rejected after sign-out")
+        } catch {
+            #expect(error is CancellationError || error is IMAPError)
+        }
+        let counts = await server.lifecycleCountsForTesting()
+        #expect(counts.connections == 0)
+        #expect(counts.invalidationHandlers == 0)
+    }
+
+    @Test
     func overlappingDisconnectAndSignOutKeepTheNewestFence() async throws {
         let state = IMAPServerLifecycleState()
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)

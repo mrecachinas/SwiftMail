@@ -62,13 +62,8 @@ extension IMAPServer {
         let connection = makeIdleConnection(
             sessionID: sessionID,
             mailbox: resolvedMailbox,
-            group: idleGroup,
-            registrationEpoch: registrationEpoch
+            group: idleGroup
         )
-        guard lifecycleState.isCurrentRegistration(connection, epoch: registrationEpoch) else {
-            try? await idleGroup.shutdownGracefully()
-            throw CancellationError()
-        }
         let authenticationGeneration = connection.captureAuthenticationGeneration()
         idleConnections[sessionID] = IdleConnection(
             mailbox: resolvedMailbox,

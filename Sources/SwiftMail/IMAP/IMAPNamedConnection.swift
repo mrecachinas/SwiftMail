@@ -73,18 +73,7 @@ public actor IMAPNamedConnection {
 
     /// Connect (or reconnect) the underlying transport and ensure authentication.
     public func connect() async throws {
-        if let lifecycleState {
-            let registrationEpoch = lifecycleState.captureRegistrationEpoch()
-            guard lifecycleState.register(connection, registrationEpoch: registrationEpoch),
-                  lifecycleState.isCurrentRegistration(connection, epoch: registrationEpoch) else {
-                validity.invalidate()
-                throw CancellationError()
-            }
-            lifecycleState.registerInvalidationHandler(for: connection) { [validity] in
-                validity.invalidate()
-            }
-        }
-        let startup = try validity.bind(to: connection, token: token)
+        let startup = try prepareLifecycleRegistration()
         do {
             try await connection.connect(
                 expectedGeneration: startup.transportGeneration,
@@ -134,7 +123,7 @@ public actor IMAPNamedConnection {
     }
 
     func ensureAuthenticated(authenticationGeneration: Int? = nil) async throws {
-        try validity.check(token)
+        try prepareLifecycleRegistration()
         guard !connection.isAuthenticated else { return }
         let startup = try validity.bind(to: connection, token: token)
 
@@ -184,6 +173,57 @@ public actor IMAPNamedConnection {
                     waiter.resume(throwing: error)
             }
         }
+    }
+
+    /// Bind the lease before publishing its transport in the server registry,
+    /// then install invalidation before any connect/auth await. A failed epoch
+    /// or handler installation rolls back the registration so stale handles
+    /// cannot repopulate the registry.
+    @discardableResult
+    private func prepareLifecycleRegistration() throws -> IMAPNamedConnectionStartup {
+        let startup = try validity.bind(to: connection, token: token)
+        guard let lifecycleState else { return startup }
+
+        let registrationEpoch = lifecycleState.captureRegistrationEpoch()
+        guard lifecycleState.register(connection, registrationEpoch: registrationEpoch),
+              lifecycleState.isCurrentRegistration(connection, epoch: registrationEpoch) else {
+            lifecycleState.unregister(connection)
+            validity.invalidate()
+            throw CancellationError()
+        }
+        let leaseValidity = validity
+        let handlerInstalled = lifecycleState.registerInvalidationHandler(for: connection) {
+            leaseValidity.invalidate()
+        }
+        guard handlerInstalled else {
+            lifecycleState.unregister(connection)
+            validity.invalidate()
+            throw CancellationError()
+        }
+
+        let leaseConnection = connection
+        let leaseToken = token
+        connection.setLifecyclePreparation { [weak lifecycleState, weak leaseValidity, leaseConnection, leaseToken] in
+            guard let lifecycleState, let leaseValidity else {
+                throw CancellationError()
+            }
+            _ = try leaseValidity.bind(to: leaseConnection, token: leaseToken)
+            let epoch = lifecycleState.captureRegistrationEpoch()
+            guard lifecycleState.register(leaseConnection, registrationEpoch: epoch),
+                  lifecycleState.isCurrentRegistration(leaseConnection, epoch: epoch) else {
+                lifecycleState.unregister(leaseConnection)
+                leaseValidity.invalidate()
+                throw CancellationError()
+            }
+            guard lifecycleState.registerInvalidationHandler(for: leaseConnection, {
+                leaseValidity.invalidate()
+            }) else {
+                lifecycleState.unregister(leaseConnection)
+                leaseValidity.invalidate()
+                throw CancellationError()
+            }
+        }
+        return startup
     }
 
     @discardableResult

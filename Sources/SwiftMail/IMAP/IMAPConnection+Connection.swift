@@ -46,6 +46,8 @@ extension IMAPConnection {
         if let authenticationGeneration {
             try checkAuthenticationGeneration(authenticationGeneration)
         }
+        // Establish the lifecycle fence before opening a socket.
+        try prepareLifecycleForTransport()
         clearInvalidChannel()
         if channel?.isActive == true {
             logger.debug("\(connectionContext) connect requested while channel is already active")
