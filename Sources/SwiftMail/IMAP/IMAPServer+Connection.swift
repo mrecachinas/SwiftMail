@@ -291,6 +291,9 @@ extension IMAPServer {
         }
 
         if let existing = namedConnections[normalizedName] {
+            guard lifecycleState.register(existing.connection) else {
+                throw CancellationError()
+            }
             return existing.handle
         }
 
