@@ -67,6 +67,35 @@ struct NamedConnectionLifecycleTests {
     }
 
     @Test
+    func repeatedNamedTeardownDoesNotRetainRegistryEntries() async throws {
+        let server = IMAPServer(host: "localhost", port: 1, useTLS: false)
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+
+        for index in 0..<32 {
+            let connection = makeConnection(group: group, identifier: "named-\(index)")
+            let token = IMAPNamedConnectionToken(name: "named-\(index)", generation: 1)
+            let validity = IMAPNamedConnectionValidity()
+            let handle = IMAPNamedConnection(
+                name: token.name,
+                connection: connection,
+                token: token,
+                validity: validity,
+                authenticateOnConnection: { _ in }
+            )
+            await server.installNamedForTesting(.init(
+                connection: connection, handle: handle, token: token
+            ))
+            let installedCount = await server.lifecycleCountsForTesting().connections
+            #expect(installedCount == 2)
+            await server.closeConnection(token: token)
+            let remainingCount = await server.lifecycleCountsForTesting().connections
+            #expect(remainingCount == 1)
+        }
+
+        try? await group.shutdownGracefully()
+    }
+
+    @Test
     func forceCloseFailsPendingWaitersAndFencesTransport() async throws {
         let server = IMAPServer(host: "localhost", port: 1, useTLS: false)
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -80,6 +109,7 @@ struct NamedConnectionLifecycleTests {
         let waiter = Task {
             try await server.waitForPendingForTesting(name: "pending")
         }
+
         for _ in 0..<100 where await server.pendingWaiterCountForTesting(name: "pending") == 0 {
             try await Task.sleep(nanoseconds: 1_000_000)
         }
@@ -257,10 +287,12 @@ extension IMAPServer {
     }
 
     func installPendingForTesting(_ pending: PendingNamedConnection) {
+        _ = lifecycleState.register(pending.connection)
         pendingNamedConnections[pending.token.name] = pending
     }
 
     func installNamedForTesting(_ entry: NamedConnection) {
+        _ = lifecycleState.register(entry.connection)
         namedConnections[entry.token.name] = entry
     }
 
