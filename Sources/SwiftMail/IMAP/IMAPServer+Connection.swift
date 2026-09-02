@@ -11,6 +11,15 @@ extension IMAPServer {
         primaryConnection.forceCloseTransport()
     }
 
+    /// Immediately closes and evicts one reusable named connection without
+    /// waiting for its command queue.
+    public func forceCloseConnection(named name: String) {
+        let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedName.isEmpty else { return }
+        let entry = namedConnections.removeValue(forKey: normalizedName)
+        entry?.connection.forceCloseTransport()
+    }
+
     /**
      Connect to the IMAP server using SSL/TLS
 
