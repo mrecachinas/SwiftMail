@@ -186,8 +186,15 @@ extension IMAPConnection {
             command: .authenticate(mechanism: mechanism, initialResponse: initialResponse)
         )
         let wrapped = IMAPClientHandler.OutboundIn.part(CommandStreamPart.tagged(command))
-        if let authenticationGeneration { try checkAuthenticationGeneration(authenticationGeneration) }
-        try await channel.writeAndFlush(wrapped)
+        if let authenticationGeneration {
+            try await enqueueCredentialWrite(
+                wrapped,
+                on: channel,
+                authenticationGeneration: authenticationGeneration
+            ).get()
+        } else {
+            try await channel.writeAndFlush(wrapped)
+        }
     }
 
     private func prepareAuthenticationChannel(
@@ -396,8 +403,15 @@ extension IMAPConnection {
             command: .authenticate(mechanism: mechanism, initialResponse: initialResponse)
         )
         let wrapped = IMAPClientHandler.OutboundIn.part(CommandStreamPart.tagged(command))
-        if let authenticationGeneration { try checkAuthenticationGeneration(authenticationGeneration) }
-        try await channel.writeAndFlush(wrapped).get()
+        if let authenticationGeneration {
+            try await enqueueCredentialWrite(
+                wrapped,
+                on: channel,
+                authenticationGeneration: authenticationGeneration
+            ).get()
+        } else {
+            try await channel.writeAndFlush(wrapped).get()
+        }
     }
 
     private func handleXOAUTH2Failure(

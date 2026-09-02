@@ -189,7 +189,19 @@ extension IMAPConnection {
             if let authenticationGeneration {
                 try checkAuthenticationGeneration(authenticationGeneration)
             }
-            try await command.send(on: channel, tag: tag)
+            if let loginCommand = command as? LoginCommand,
+               let authenticationGeneration {
+                let wrapped = IMAPClientHandler.OutboundIn.part(
+                    CommandStreamPart.tagged(loginCommand.toTaggedCommand(tag: tag))
+                )
+                try await enqueueCredentialWrite(
+                    wrapped,
+                    on: channel,
+                    authenticationGeneration: authenticationGeneration
+                ).get()
+            } else {
+                try await command.send(on: channel, tag: tag)
+            }
             let result = try await resultPromise.futureResult.get()
             if let authenticationGeneration {
                 try checkAuthenticationGeneration(authenticationGeneration)
@@ -220,6 +232,24 @@ extension IMAPConnection {
                 try? await disconnectBody()
             }
             throw error
+        }
+    }
+
+    /// Validate the authentication generation and enqueue credentials while
+    /// holding the same lock used by invalidation and force-close. The write is
+    /// synchronous at the NIO boundary; only waiting for its future may suspend.
+    func enqueueCredentialWrite(
+        _ wrapped: IMAPClientHandler.Message,
+        on channel: Channel,
+        authenticationGeneration: Int
+    ) throws -> EventLoopFuture<Void> {
+        try transportState.lock.withLock {
+            guard transportState.authenticationGeneration == authenticationGeneration,
+                  transportState.channel === channel,
+                  channel.isActive else {
+                throw CancellationError()
+            }
+            return channel.writeAndFlush(wrapped)
         }
     }
 

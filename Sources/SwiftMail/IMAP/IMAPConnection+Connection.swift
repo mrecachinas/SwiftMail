@@ -64,14 +64,24 @@ extension IMAPConnection {
 
         let bootstrap = makeConnectionBootstrap(initialTLSMode: tlsTransportMode, greetingHandler: greetingHandler)
         let channel = try await openChannel(bootstrap: bootstrap, greetingPromise: greetingPromise)
+        var published = false
+        defer {
+            // A channel returned by connect() is not owned by transportState
+            // until publication succeeds. Invalidation can happen while the
+            // connect is suspended, when force-close quite correctly sees nil.
+            if !published {
+                greetingPromise.fail(CancellationError())
+                channel.close(promise: nil)
+            }
+        }
         if let authenticationGeneration {
             try checkAuthenticationGeneration(authenticationGeneration)
         }
 
         guard publishChannelIfCurrent(channel, generation: generation) else {
-            channel.close(promise: nil)
             throw CancellationError()
         }
+        published = true
         self.isSessionAuthenticated = false
         self.namespaces = nil
 
@@ -168,6 +178,9 @@ extension IMAPConnection {
         bootstrap: ClientBootstrap,
         greetingPromise: EventLoopPromise<[Capability]>
     ) async throws -> Channel {
+        if let openChannelOverrideForTesting {
+            return try await openChannelOverrideForTesting()
+        }
         do {
             return try await bootstrap.connect(host: host, port: port).get()
         } catch {

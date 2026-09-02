@@ -119,10 +119,10 @@ extension IMAPServer {
             username: username, password: password,
             authenticationGeneration: authenticationGeneration
         )
-        authentication = Authentication(
+        try storeAuthenticationIfCurrent(Authentication(
             method: .login(username: username, password: password),
             identification: clientIdentification
-        )
+        ), generation: authenticationGeneration)
         try await identifyPrimaryConnectionIfNeeded(
             authenticationGeneration: authenticationGeneration
         )
@@ -146,10 +146,10 @@ extension IMAPServer {
             username: username, password: password,
             authenticationGeneration: authenticationGeneration
         )
-        authentication = Authentication(
+        try storeAuthenticationIfCurrent(Authentication(
             method: .plain(username: username, password: password),
             identification: clientIdentification
-        )
+        ), generation: authenticationGeneration)
         try await identifyPrimaryConnectionIfNeeded(
             authenticationGeneration: authenticationGeneration
         )
@@ -168,10 +168,10 @@ extension IMAPServer {
             email: email, accessToken: accessToken,
             authenticationGeneration: authenticationGeneration
         )
-        authentication = Authentication(
+        try storeAuthenticationIfCurrent(Authentication(
             method: .xoauth2(email: email, accessTokenProvider: { accessToken }),
             identification: clientIdentification
-        )
+        ), generation: authenticationGeneration)
         try await identifyPrimaryConnectionIfNeeded(
             authenticationGeneration: authenticationGeneration
         )
@@ -205,6 +205,17 @@ extension IMAPServer {
     public func setClientIdentification(_ identification: Identification?) {
         clientIdentification = identification
         authentication?.identification = identification
+    }
+
+    func storeAuthenticationIfCurrent(
+        _ value: Authentication,
+        generation: Int
+    ) throws {
+        // Keep this check immediately adjacent to publication. The actor cannot
+        // suspend between the validation and assignment, so sign-out cannot
+        // leave a stale credential replay after the authentication await.
+        try primaryConnection.checkAuthenticationGeneration(generation)
+        authentication = value
     }
 
     /// RFC 2971 replay for the primary connection's explicit authentication
@@ -244,7 +255,7 @@ extension IMAPServer {
      - Note: Logs disconnection at debug level
      */
     public func disconnect() async throws {
-        try await closeAllConnections()
+        try await closeAllConnections(clearAuthentication: false)
     }
 
     /// Retrieve (or create) a reusable named connection.
@@ -362,7 +373,15 @@ extension IMAPServer {
     public func logout() async throws {
         let command = LogoutCommand()
         try await executeCommand(command)
-        try await closeAllConnections()
+        try await closeAllConnections(clearAuthentication: true)
+    }
+
+    /// Clears credentials retained for transparent reconnect authentication.
+    /// The current transport is left untouched so callers can coordinate a
+    /// graceful close separately.
+    public func clearReplayCredentials() {
+        authentication = nil
+        primaryConnection.invalidateAuthenticationGeneration()
     }
 
     // MARK: - Connection Management Helpers
@@ -470,7 +489,14 @@ extension IMAPServer {
         try? await entry.idleGroup.shutdownGracefully()
     }
 
-    func closeAllConnections() async throws {
+    func closeAllConnections(clearAuthentication: Bool = true) async throws {
+        if clearAuthentication {
+            // Fence in-flight authentication before any teardown await. This
+            // also prevents credentials from being published after logout.
+            authentication = nil
+            primaryConnection.invalidateAuthenticationGeneration()
+        }
+
         let idleEntries = idleConnections
         idleConnections.removeAll()
 

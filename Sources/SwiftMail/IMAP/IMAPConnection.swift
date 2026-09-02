@@ -66,6 +66,7 @@ final class IMAPConnection {
     let commandQueue = IMAPCommandQueue()
     let responseBuffer = UntaggedResponseBuffer()
     var startTLSUpgradeOverrideForTesting: (() async throws -> Void)?
+    var openChannelOverrideForTesting: (() async throws -> Channel)?
     var transportGeneration: Int {
         get { transportState.lock.withLock { transportState.generation } }
         set { transportState.lock.withLock { transportState.generation = newValue } }
@@ -339,6 +340,24 @@ final class IMAPConnection {
 
     func replaceStartTLSUpgradeForTesting(_ upgrade: (() async throws -> Void)?) {
         self.startTLSUpgradeOverrideForTesting = upgrade
+    }
+
+    func replaceOpenChannelForTesting(_ open: (() async throws -> Channel)?) {
+        self.openChannelOverrideForTesting = open
+    }
+
+
+    /// Invalidate authentication operations without closing the transport.
+    ///
+    /// Used by server teardown before it awaits graceful protocol cleanup. Any
+    /// credential-bearing operation that has not enqueued its write is rejected.
+    func invalidateAuthenticationGeneration() {
+        transportState.lock.withLock {
+            transportState.authenticationGeneration += 1
+            transportState.isSessionAuthenticated = false
+            transportState.capabilities = []
+            transportState.namespaces = nil
+        }
     }
 
     func connect() async throws {

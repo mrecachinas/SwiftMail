@@ -1,4 +1,8 @@
+import Foundation
 import NIO
+import NIOEmbedded
+import NIOIMAP
+import NIOIMAPCore
 import Testing
 @testable import SwiftMail
 
@@ -16,8 +20,8 @@ struct AuthenticationGenerationFenceTests {
             await gate.waitUntilReleased()
             return box.connection.publishAuthenticationIfCurrent(generation)
         }
-        await gate.release()
         _ = connection.forceCloseTransport()
+        await gate.release()
 
         #expect(await publication.value == false)
         #expect(!connection.isAuthenticated)
@@ -76,6 +80,55 @@ struct AuthenticationGenerationFenceTests {
         try? await group.shutdownGracefully()
     }
 
+    @Test
+    func invalidationWhileOpenIsPendingClosesUnpublishedChannel() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let connection = makeConnection(group: group)
+        let openedChannel = EmbeddedChannel()
+        let gate = OpenChannelGate()
+        connection.replaceOpenChannelForTesting {
+            await gate.waitUntilReleased()
+            return openedChannel
+        }
+
+        let connect = Task { try await connection.connect() }
+        while !(await gate.isStarted()) {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+
+        _ = connection.forceCloseTransport()
+        await gate.release()
+
+        do {
+            try await connect.value
+            Issue.record("stale open should fail")
+        } catch {
+            #expect(error is CancellationError)
+        }
+        #expect(!openedChannel.isActive)
+        try? await group.shutdownGracefully()
+    }
+
+    @Test
+    func staleAuthenticationCannotBePublishedAfterReplayCredentialsAreCleared() async throws {
+        let server = IMAPServer(host: "localhost", port: 1, useTLS: false)
+        let connection = await server.primaryConnection
+        let generation = connection.captureAuthenticationGeneration()
+        await server.clearReplayCredentials()
+
+        let value = IMAPServer.Authentication(
+            method: .login(username: "user", password: "password"),
+            identification: nil
+        )
+        do {
+            try await server.storeAuthenticationIfCurrent(value, generation: generation)
+            Issue.record("stale authentication should not be published")
+        } catch {
+            #expect(error is CancellationError)
+        }
+        #expect(await server.authentication == nil)
+    }
+
     private func makeConnection(group: EventLoopGroup) -> IMAPConnection {
         IMAPConnection(
             host: "localhost", port: 1, useTLS: false, group: group,
@@ -83,6 +136,23 @@ struct AuthenticationGenerationFenceTests {
             inboundLabel: "test.auth-generation.in", connectionID: "auth-generation",
             connectionRole: "test"
         )
+    }
+
+    private actor OpenChannelGate {
+        private var started = false
+        private var continuation: CheckedContinuation<Void, Never>?
+
+        func waitUntilReleased() async {
+            started = true
+            await withCheckedContinuation { continuation = $0 }
+        }
+
+        func isStarted() -> Bool { started }
+
+        func release() {
+            continuation?.resume()
+            continuation = nil
+        }
     }
 }
 
