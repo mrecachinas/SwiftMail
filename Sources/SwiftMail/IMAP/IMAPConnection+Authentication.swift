@@ -4,8 +4,8 @@ import NIOIMAPCore
 import NIO
 
 extension IMAPConnection {
-    func login(username: String, password: String) async throws {
-        let authenticationGeneration = captureAuthenticationGeneration()
+    func login(username: String, password: String, authenticationGeneration: Int? = nil) async throws {
+        let authenticationGeneration = authenticationGeneration ?? captureAuthenticationGeneration()
         let command = LoginCommand(username: username, password: password)
         let loginCapabilities = try await executeCommand(
             command, authenticationGeneration: authenticationGeneration
@@ -21,8 +21,8 @@ extension IMAPConnection {
     /// When the server advertises `SASL-IR`, the credentials are sent inline with the
     /// AUTHENTICATE command (saving a round trip). Otherwise falls back to the standard
     /// continuation-based exchange.
-    func authenticatePlain(username: String, password: String) async throws {
-        let authenticationGeneration = captureAuthenticationGeneration()
+    func authenticatePlain(username: String, password: String, authenticationGeneration: Int? = nil) async throws {
+        let authenticationGeneration = authenticationGeneration ?? captureAuthenticationGeneration()
         try await commandQueue.run { [self] in
             try await self.authenticatePlainBody(
                 username: username, password: password,
@@ -31,8 +31,8 @@ extension IMAPConnection {
         }
     }
 
-    func authenticateXOAUTH2(email: String, accessToken: String) async throws {
-        let authenticationGeneration = captureAuthenticationGeneration()
+    func authenticateXOAUTH2(email: String, accessToken: String, authenticationGeneration: Int? = nil) async throws {
+        let authenticationGeneration = authenticationGeneration ?? captureAuthenticationGeneration()
         try await commandQueue.run { [self] in
             try await self.authenticateXOAUTH2Body(
                 email: email, accessToken: accessToken,

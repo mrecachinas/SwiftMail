@@ -11,7 +11,17 @@ extension IMAPConnection {
     /// skips LOGOUT/DONE so a stalled protocol operation cannot delay transport
     /// teardown.
     func forceCloseTransport() {
-        let channel = transportState.lock.withLock {
+        _ = forceCloseTransport(ifCurrentGeneration: nil)
+    }
+
+    /// Closes the transport only when it is still the generation that an
+    /// operation started on. Delayed cancellation cannot close a replacement.
+    @discardableResult
+    func forceCloseTransport(ifCurrentGeneration expectedGeneration: Int?) -> Bool {
+        let result = transportState.lock.withLock {
+            if let expectedGeneration, transportState.generation != expectedGeneration {
+                return (false, Optional<Channel>.none)
+            }
             transportState.generation += 1
             transportState.authenticationGeneration += 1
             let channel = transportState.channel
@@ -21,10 +31,12 @@ extension IMAPConnection {
             transportState.namespaces = nil
             transportState.idleHandler = nil
             transportState.idleTerminationInProgress = false
-            return channel
+            return (true, channel)
         }
-        channel?.close(promise: nil)
+        guard result.0 else { return false }
+        result.1?.close(promise: nil)
         responseBuffer.reset()
+        return true
     }
 
     func connectBody(

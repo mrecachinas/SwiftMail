@@ -314,6 +314,20 @@ final class IMAPConnection {
         }
     }
 
+    /// Starts a connection using generations captured by its owning lease.
+    func connect(expectedGeneration: Int, authenticationGeneration: Int) async throws {
+        try await commandQueue.run { [self] in
+            guard self.isCurrentTransportGeneration(expectedGeneration) else {
+                throw CancellationError()
+            }
+            try self.checkAuthenticationGeneration(authenticationGeneration)
+            try await self.connectBody(
+                expectedGeneration: expectedGeneration,
+                authenticationGeneration: authenticationGeneration
+            )
+        }
+    }
+
     func done(timeoutSeconds: TimeInterval = 15) async throws {
         try await commandQueue.run { [self] in
             try await self.doneBody(timeoutSeconds: timeoutSeconds)

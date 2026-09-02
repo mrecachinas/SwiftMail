@@ -139,10 +139,15 @@ public actor IMAPServer {
     }
 
     struct PendingNamedConnection {
+        struct Waiter {
+            let id: UUID
+            let continuation: CheckedContinuation<IMAPNamedConnection, any Error>
+        }
+
         let connection: IMAPConnection
         let token: IMAPNamedConnectionToken
         let validity: IMAPNamedConnectionValidity
-        var waiters: [CheckedContinuation<IMAPNamedConnection, any Error>]
+        var waiters: [Waiter]
     }
 
     enum AuthenticationMethod {
@@ -155,15 +160,27 @@ public actor IMAPServer {
         let method: AuthenticationMethod
         var identification: Identification?
 
-        func authenticate(on connection: IMAPConnection) async throws {
+        func authenticate(
+            on connection: IMAPConnection,
+            authenticationGeneration: Int? = nil
+        ) async throws {
             switch method {
                 case .login(let username, let password):
-                    try await connection.login(username: username, password: password)
+                    try await connection.login(
+                        username: username, password: password,
+                        authenticationGeneration: authenticationGeneration
+                    )
                 case .plain(let username, let password):
-                    try await connection.authenticatePlain(username: username, password: password)
+                    try await connection.authenticatePlain(
+                        username: username, password: password,
+                        authenticationGeneration: authenticationGeneration
+                    )
                 case .xoauth2(let email, let accessTokenProvider):
                     let accessToken = try await accessTokenProvider()
-                    try await connection.authenticateXOAUTH2(email: email, accessToken: accessToken)
+                    try await connection.authenticateXOAUTH2(
+                        email: email, accessToken: accessToken,
+                        authenticationGeneration: authenticationGeneration
+                    )
             }
             // RFC 2971: some servers (e.g. NetEase 163/126) reject SELECT on any
             // authenticated connection that has not identified itself, so the

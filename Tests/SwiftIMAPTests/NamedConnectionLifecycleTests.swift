@@ -3,6 +3,23 @@ import NIO
 import Testing
 @testable import SwiftMail
 
+private actor PostOperationGate {
+    private var started = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        started = true
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func isStarted() -> Bool { started }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
 @Suite(.serialized)
 struct NamedConnectionLifecycleTests {
     @Test
@@ -32,6 +49,91 @@ struct NamedConnectionLifecycleTests {
         }
         #expect(await server.pendingNamedConnections["pending"] == nil)
         #expect(connection.captureTransportGeneration() == 1)
+        try? await group.shutdownGracefully()
+    }
+
+    #if os(macOS)
+        @Test
+        func forceClosePendingNamedAcquisitionCancelsConnectAndAuth() async throws {
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("swiftmail-pending-\(UUID().uuidString)")
+            let maildir = root.appendingPathComponent("Maildir")
+            try FileManager.default.createDirectory(
+                at: maildir.appendingPathComponent("cur"), withIntermediateDirectories: true
+            )
+            try FileManager.default.createDirectory(
+                at: maildir.appendingPathComponent("new"), withIntermediateDirectories: true
+            )
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let testServer = try IMAPTestServer(
+                host: "localhost", port: 0, username: "u", password: "p",
+                loginResponseDelay: 1, maildirURL: maildir
+            )
+            try testServer.start()
+            try await testServer.run {
+                let server = IMAPServer(host: "127.0.0.1", port: testServer.port, useTLS: false)
+                try await server.connect()
+                try await server.login(username: "u", password: "p")
+
+                let acquisition = Task { try await server.connection(named: "pending-auth") }
+                try await Task.sleep(nanoseconds: 50_000_000)
+                let start = ContinuousClock.now
+                await server.forceClosePendingNamedConnections()
+                do {
+                    _ = try await acquisition.value
+                    Issue.record("pending acquisition should be cancelled")
+                } catch {
+                    // NIO may surface the force-close as a transport error
+                    // rather than Swift concurrency's CancellationError.
+                    #expect(error is CancellationError || error is IMAPError)
+                }
+                #expect(start.duration(to: .now) < .seconds(1))
+                try await server.disconnect()
+            }
+        }
+    #endif
+
+    @Test
+    func postOperationInvalidationForceClosesBoundTransport() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let connection = makeConnection(group: group)
+        let validity = IMAPNamedConnectionValidity()
+        let token = IMAPNamedConnectionToken(name: "post-operation", generation: 1)
+        let gate = PostOperationGate()
+        let handle = IMAPNamedConnection(
+            name: token.name,
+            connection: connection,
+            token: token,
+            validity: validity,
+            authenticateOnConnection: { connection in
+                await gate.wait()
+                // The production server supplies this generation-aware
+                // closure; a stale callback must not publish auth state.
+                connection.isSessionAuthenticated = true
+            },
+            authenticateOnConnectionWithGeneration: { connection, generation in
+                try connection.checkAuthenticationGeneration(generation)
+                await gate.wait()
+                try connection.checkAuthenticationGeneration(generation)
+                connection.isSessionAuthenticated = true
+            }
+        )
+
+        let authentication = Task { try await handle.ensureAuthenticated() }
+        while !(await gate.isStarted()) {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        validity.invalidate()
+        await gate.release()
+        do {
+            try await authentication.value
+            Issue.record("invalidated authentication should fail")
+        } catch {
+            #expect(error is IMAPError || error is CancellationError)
+        }
+        #expect(connection.captureTransportGeneration() == 1)
+        #expect(!connection.isAuthenticated)
         try? await group.shutdownGracefully()
     }
 
@@ -97,7 +199,9 @@ private extension IMAPServer {
 
     func waitForPendingForTesting(name: String) async throws -> IMAPNamedConnection {
         try await withCheckedThrowingContinuation { continuation in
-            pendingNamedConnections[name]?.waiters.append(continuation)
+            pendingNamedConnections[name]?.waiters.append(
+                .init(id: UUID(), continuation: continuation)
+            )
         }
     }
 
