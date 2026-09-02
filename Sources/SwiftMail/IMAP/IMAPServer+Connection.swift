@@ -11,13 +11,30 @@ extension IMAPServer {
         primaryConnection.forceCloseTransport()
     }
 
-    /// Immediately closes and evicts one reusable named connection without
-    /// waiting for its command queue.
-    public func forceCloseConnection(named name: String) {
-        let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedName.isEmpty else { return }
-        let entry = namedConnections.removeValue(forKey: normalizedName)
-        entry?.connection.forceCloseTransport()
+    /// Immediately closes and evicts the exact named connection lease.
+    public func forceCloseConnection(token: IMAPNamedConnectionToken) {
+        if let pending = pendingNamedConnections[token.name], pending.token == token {
+            pendingNamedConnections.removeValue(forKey: token.name)
+            pending.validity.invalidate()
+            pending.connection.forceCloseTransport()
+            let error = CancellationError()
+            pending.waiters.forEach { $0.resume(throwing: error) }
+            return
+        }
+
+        guard let entry = namedConnections[token.name], entry.token == token else { return }
+        namedConnections.removeValue(forKey: token.name)
+        entry.handle.validity.invalidate()
+        entry.connection.forceCloseTransport()
+    }
+
+    /// Gracefully closes and removes the exact named connection lease.
+    public func closeConnection(token: IMAPNamedConnectionToken) async {
+        guard let entry = namedConnections[token.name], entry.token == token else { return }
+        namedConnections.removeValue(forKey: token.name)
+        entry.handle.validity.invalidate()
+        try? await entry.connection.done()
+        try? await entry.connection.disconnect()
     }
 
     /**
@@ -212,9 +229,9 @@ extension IMAPServer {
             return existing.handle
         }
 
-        if pendingNamedConnectionWaiters[normalizedName] != nil {
+        if pendingNamedConnections[normalizedName] != nil {
             return try await withCheckedThrowingContinuation { continuation in
-                pendingNamedConnectionWaiters[normalizedName]?.append(continuation)
+                pendingNamedConnections[normalizedName]?.waiters.append(continuation)
             }
         }
 
@@ -222,46 +239,43 @@ extension IMAPServer {
             throw IMAPError.commandFailed("Authentication required before creating a named connection")
         }
 
-        // Concurrent callers share the leader's result. Success returns the same
-        // handle; failure clears this sentinel so a later call can retry normally.
-        pendingNamedConnectionWaiters[normalizedName] = []
+        nextNamedConnectionGeneration &+= 1
+        let token = IMAPNamedConnectionToken(name: normalizedName, generation: nextNamedConnectionGeneration)
         let connection = makeNamedConnection(name: normalizedName)
+        let validity = IMAPNamedConnectionValidity()
+        pendingNamedConnections[normalizedName] = PendingNamedConnection(
+            connection: connection, token: token, validity: validity, waiters: []
+        )
 
         do {
             try await connection.connect()
             try await authentication.authenticate(on: connection)
+            guard let pending = pendingNamedConnections[normalizedName], pending.token == token else {
+                try? await connection.disconnect()
+                throw CancellationError()
+            }
 
             let handle = IMAPNamedConnection(
                 name: normalizedName,
                 connection: connection,
+                token: token,
+                validity: validity,
                 authenticateOnConnection: { connection in
                     try await authentication.authenticate(on: connection)
                 }
             )
 
-            namedConnections[normalizedName] = NamedConnection(connection: connection, handle: handle)
-            completePendingNamedConnection(named: normalizedName, with: .success(handle))
+            namedConnections[normalizedName] = NamedConnection(
+                connection: connection, handle: handle, token: token
+            )
+            pendingNamedConnections.removeValue(forKey: normalizedName)
+            pending.waiters.forEach { $0.resume(returning: handle) }
             return handle
         } catch {
+            let pending = pendingNamedConnections.removeValue(forKey: normalizedName)
             try? await connection.disconnect()
-            completePendingNamedConnection(named: normalizedName, with: .failure(error))
+            pending?.waiters.forEach { $0.resume(throwing: error) }
             throw error
-        }
-    }
-
-    private func completePendingNamedConnection(
-        named name: String,
-        with result: Result<IMAPNamedConnection, any Error>
-    ) {
-        let waiters = pendingNamedConnectionWaiters.removeValue(forKey: name) ?? []
-
-        for waiter in waiters {
-            switch result {
-                case .success(let handle):
-                    waiter.resume(returning: handle)
-                case .failure(let error):
-                    waiter.resume(throwing: error)
-            }
         }
     }
 
@@ -395,10 +409,20 @@ extension IMAPServer {
             await teardownIdleEntry(entry)
         }
 
+        let pendingEntries = pendingNamedConnections
+        pendingNamedConnections.removeAll()
+        let cancellationError = CancellationError()
+        for pending in pendingEntries.values {
+            pending.validity.invalidate()
+            pending.connection.forceCloseTransport()
+            pending.waiters.forEach { $0.resume(throwing: cancellationError) }
+        }
+
         let namedEntries = namedConnections
         namedConnections.removeAll()
 
         for entry in namedEntries.values {
+            entry.handle.validity.invalidate()
             try? await entry.connection.done()
             try? await entry.connection.disconnect()
         }

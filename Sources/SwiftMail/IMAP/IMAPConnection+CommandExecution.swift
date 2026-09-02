@@ -53,24 +53,39 @@ extension IMAPConnection {
         }
     }
 
-    func executeCommand<CommandType: IMAPCommand>(_ command: CommandType) async throws -> CommandType.ResultType {
+    func executeCommand<CommandType: IMAPCommand>(
+        _ command: CommandType,
+        authenticationGeneration: Int? = nil
+    ) async throws -> CommandType.ResultType {
         try await commandQueue.run { [self] in
-            try await self.executeCommandBody(command)
+            if let authenticationGeneration {
+                try self.checkAuthenticationGeneration(authenticationGeneration)
+            }
+            return try await self.executeCommandBody(
+                command, authenticationGeneration: authenticationGeneration
+            )
         }
     }
 
     func executeCommandBody<CommandType: IMAPCommand>(
-        _ command: CommandType
+        _ command: CommandType,
+        authenticationGeneration: Int? = nil
     ) async throws -> CommandType.ResultType {
         try command.validate()
+        if let authenticationGeneration {
+            try checkAuthenticationGeneration(authenticationGeneration)
+        }
         try await waitForIdleCompletionIfNeeded()
         try await recycleConnectionIfBufferedTerminationIfNeeded(operation: String(describing: CommandType.self))
 
         clearInvalidChannel()
 
         if self.channel == nil {
+            if let authenticationGeneration {
+                try checkAuthenticationGeneration(authenticationGeneration)
+            }
             logger.info("\(connectionContext) Channel is nil, re-establishing connection before sending command")
-            try await connectBody()
+            try await connectBody(authenticationGeneration: authenticationGeneration)
         }
 
         guard let channel = self.channel, channel.isActive else {
@@ -85,6 +100,9 @@ extension IMAPConnection {
             timeoutSeconds: command.timeoutSeconds,
             promise: resultPromise
         )
+        if let authenticationGeneration {
+            try checkAuthenticationGeneration(authenticationGeneration)
+        }
 
         return try await runCommandHandler(
             CommandHandlerRun(
@@ -93,7 +111,8 @@ extension IMAPConnection {
                 tag: tag,
                 handler: handler,
                 resultPromise: resultPromise,
-                scheduledTask: scheduledTask
+                scheduledTask: scheduledTask,
+                authenticationGeneration: authenticationGeneration
             )
         )
     }
@@ -105,6 +124,7 @@ extension IMAPConnection {
         let handler: CommandType.HandlerType
         let resultPromise: EventLoopPromise<CommandType.ResultType>
         let scheduledTask: Scheduled<Void>
+        let authenticationGeneration: Int?
     }
 
     private func scheduleCommandTimeout<ResultType: Sendable>(
@@ -128,9 +148,13 @@ extension IMAPConnection {
         let handler = run.handler
         let resultPromise = run.resultPromise
         let scheduledTask = run.scheduledTask
+        let authenticationGeneration = run.authenticationGeneration
         do {
             try await channel.pipeline.addHandler(handler, position: .before(responseBuffer)).get()
             responseBuffer.hasActiveHandler = true
+            if let authenticationGeneration {
+                try checkAuthenticationGeneration(authenticationGeneration)
+            }
             try await command.send(on: channel, tag: tag)
             let result = try await resultPromise.futureResult.get()
 

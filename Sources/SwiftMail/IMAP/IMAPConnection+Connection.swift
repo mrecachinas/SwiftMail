@@ -13,6 +13,7 @@ extension IMAPConnection {
     func forceCloseTransport() {
         let channel = transportState.lock.withLock {
             transportState.generation += 1
+            transportState.authenticationGeneration += 1
             let channel = transportState.channel
             transportState.channel = nil
             transportState.isSessionAuthenticated = false
@@ -26,7 +27,13 @@ extension IMAPConnection {
         responseBuffer.reset()
     }
 
-    func connectBody(expectedGeneration: Int? = nil) async throws {
+    func connectBody(
+        expectedGeneration: Int? = nil,
+        authenticationGeneration: Int? = nil
+    ) async throws {
+        if let authenticationGeneration {
+            try checkAuthenticationGeneration(authenticationGeneration)
+        }
         clearInvalidChannel()
         if channel?.isActive == true {
             logger.debug("\(connectionContext) connect requested while channel is already active")
@@ -45,6 +52,9 @@ extension IMAPConnection {
 
         let bootstrap = makeConnectionBootstrap(initialTLSMode: tlsTransportMode, greetingHandler: greetingHandler)
         let channel = try await openChannel(bootstrap: bootstrap, greetingPromise: greetingPromise)
+        if let authenticationGeneration {
+            try checkAuthenticationGeneration(authenticationGeneration)
+        }
 
         guard publishChannelIfCurrent(channel, generation: generation) else {
             channel.close(promise: nil)

@@ -14,6 +14,7 @@ final class IMAPTransportState: @unchecked Sendable {
     var idleHandler: IdleHandler?
     var idleTerminationInProgress = false
     var generation = 0
+    var authenticationGeneration = 0
 }
 
 /// Internal connection wrapper used by IMAPServer to manage per-connection state.
@@ -79,6 +80,16 @@ final class IMAPConnection {
 
     func isCurrentTransportGeneration(_ generation: Int) -> Bool {
         transportState.lock.withLock { transportState.generation == generation }
+    }
+
+    func captureAuthenticationGeneration() -> Int {
+        transportState.lock.withLock { transportState.authenticationGeneration }
+    }
+
+    func checkAuthenticationGeneration(_ generation: Int) throws {
+        guard transportState.lock.withLock({ transportState.authenticationGeneration == generation }) else {
+            throw CancellationError()
+        }
     }
 
     func publishChannelIfCurrent(_ channel: Channel, generation: Int) -> Bool {

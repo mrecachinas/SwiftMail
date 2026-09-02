@@ -5,8 +5,12 @@ import NIO
 
 extension IMAPConnection {
     func login(username: String, password: String) async throws {
+        let authenticationGeneration = captureAuthenticationGeneration()
         let command = LoginCommand(username: username, password: password)
-        let loginCapabilities = try await executeCommand(command)
+        let loginCapabilities = try await executeCommand(
+            command, authenticationGeneration: authenticationGeneration
+        )
+        try checkAuthenticationGeneration(authenticationGeneration)
         isSessionAuthenticated = true
         try await refreshCapabilities(using: loginCapabilities)
         await fetchNamespacesIfSupported(useCommandBody: false)
@@ -18,18 +22,29 @@ extension IMAPConnection {
     /// AUTHENTICATE command (saving a round trip). Otherwise falls back to the standard
     /// continuation-based exchange.
     func authenticatePlain(username: String, password: String) async throws {
+        let authenticationGeneration = captureAuthenticationGeneration()
         try await commandQueue.run { [self] in
-            try await self.authenticatePlainBody(username: username, password: password)
+            try await self.authenticatePlainBody(
+                username: username, password: password,
+                authenticationGeneration: authenticationGeneration
+            )
         }
     }
 
     func authenticateXOAUTH2(email: String, accessToken: String) async throws {
+        let authenticationGeneration = captureAuthenticationGeneration()
         try await commandQueue.run { [self] in
-            try await self.authenticateXOAUTH2Body(email: email, accessToken: accessToken)
+            try await self.authenticateXOAUTH2Body(
+                email: email, accessToken: accessToken,
+                authenticationGeneration: authenticationGeneration
+            )
         }
     }
 
-    func authenticatePlainBody(username: String, password: String) async throws {
+    func authenticatePlainBody(
+        username: String, password: String, authenticationGeneration: Int? = nil
+    ) async throws {
+        if let authenticationGeneration { try checkAuthenticationGeneration(authenticationGeneration) }
         let mechanism = AuthenticationMechanism("PLAIN")
         let plainCapability = Capability.authenticate(mechanism)
 
@@ -37,7 +52,9 @@ extension IMAPConnection {
             throw IMAPError.unsupportedAuthMechanism("PLAIN not advertised by server")
         }
 
-        let channel = try await prepareAuthenticationChannel(operation: "PLAIN authenticate")
+        let channel = try await prepareAuthenticationChannel(
+            operation: "PLAIN authenticate", authenticationGeneration: authenticationGeneration
+        )
         let tag = generateCommandTag()
 
         let handlerPromise = channel.eventLoop.makePromise(of: [Capability].self)
@@ -51,6 +68,7 @@ extension IMAPConnection {
             expectsChallenge: expectsChallenge
         )
 
+        if let authenticationGeneration { try checkAuthenticationGeneration(authenticationGeneration) }
         try await runPlainAuthentication(
             PlainAuthenticationRun(
                 channel: channel,
@@ -58,7 +76,8 @@ extension IMAPConnection {
                 mechanism: mechanism,
                 initialResponse: initialResponse,
                 handler: handler,
-                handlerPromise: handlerPromise
+                handlerPromise: handlerPromise,
+                authenticationGeneration: authenticationGeneration
             )
         )
     }
@@ -70,6 +89,7 @@ extension IMAPConnection {
         let initialResponse: InitialResponse?
         let handler: PlainAuthenticationHandler
         let handlerPromise: EventLoopPromise<[Capability]>
+        let authenticationGeneration: Int?
     }
 
     private func runPlainAuthentication(_ run: PlainAuthenticationRun) async throws {
@@ -79,6 +99,7 @@ extension IMAPConnection {
         let initialResponse = run.initialResponse
         let handler = run.handler
         let handlerPromise = run.handlerPromise
+        let authenticationGeneration = run.authenticationGeneration
         var scheduledTask: Scheduled<Void>?
 
         do {
@@ -86,13 +107,16 @@ extension IMAPConnection {
             responseBuffer.hasActiveHandler = true
 
             scheduledTask = schedulePlainAuthTimeout(channel: channel, promise: handlerPromise)
+            if let authenticationGeneration { try checkAuthenticationGeneration(authenticationGeneration) }
             try await sendAuthenticateCommand(
                 channel: channel,
                 tag: tag,
                 mechanism: mechanism,
-                initialResponse: initialResponse
+                initialResponse: initialResponse,
+                authenticationGeneration: authenticationGeneration
             )
             let postAuthCapabilities = try await handlerPromise.futureResult.get()
+            if let authenticationGeneration { try checkAuthenticationGeneration(authenticationGeneration) }
 
             scheduledTask?.cancel()
             responseBuffer.hasActiveHandler = false
@@ -136,30 +160,37 @@ extension IMAPConnection {
         channel: Channel,
         tag: String,
         mechanism: AuthenticationMechanism,
-        initialResponse: InitialResponse?
+        initialResponse: InitialResponse?,
+        authenticationGeneration: Int? = nil
     ) async throws {
         let command = TaggedCommand(
             tag: tag,
             command: .authenticate(mechanism: mechanism, initialResponse: initialResponse)
         )
         let wrapped = IMAPClientHandler.OutboundIn.part(CommandStreamPart.tagged(command))
+        if let authenticationGeneration { try checkAuthenticationGeneration(authenticationGeneration) }
         try await channel.writeAndFlush(wrapped)
     }
 
-    private func prepareAuthenticationChannel(operation: String) async throws -> Channel {
+    private func prepareAuthenticationChannel(
+        operation: String, authenticationGeneration: Int? = nil
+    ) async throws -> Channel {
+        if let authenticationGeneration { try checkAuthenticationGeneration(authenticationGeneration) }
         try await waitForIdleCompletionIfNeeded()
         try await recycleConnectionIfBufferedTerminationIfNeeded(operation: operation)
 
         clearInvalidChannel()
 
         if self.channel == nil {
+            if let authenticationGeneration { try checkAuthenticationGeneration(authenticationGeneration) }
             logger.info("\(connectionContext) Channel is nil, re-establishing connection before authentication")
-            try await connectBody()
+            try await connectBody(authenticationGeneration: authenticationGeneration)
         }
 
         guard let channel = self.channel, channel.isActive else {
             throw IMAPError.connectionFailed("Channel not initialized")
         }
+        if let authenticationGeneration { try checkAuthenticationGeneration(authenticationGeneration) }
         return channel
     }
 
@@ -207,7 +238,10 @@ extension IMAPConnection {
         return buffer
     }
 
-    func authenticateXOAUTH2Body(email: String, accessToken: String) async throws {
+    func authenticateXOAUTH2Body(
+        email: String, accessToken: String, authenticationGeneration: Int? = nil
+    ) async throws {
+        if let authenticationGeneration { try checkAuthenticationGeneration(authenticationGeneration) }
         let mechanism = AuthenticationMechanism("XOAUTH2")
         let xoauthCapability = Capability.authenticate(mechanism)
 
@@ -215,7 +249,9 @@ extension IMAPConnection {
             throw IMAPError.unsupportedAuthMechanism("XOAUTH2 not advertised by server")
         }
 
-        let channel = try await prepareAuthenticationChannel(operation: "XOAUTH2 authenticate")
+        let channel = try await prepareAuthenticationChannel(
+            operation: "XOAUTH2 authenticate", authenticationGeneration: authenticationGeneration
+        )
         let tag = generateCommandTag()
 
         let handlerPromise = channel.eventLoop.makePromise(of: [Capability].self)
@@ -230,6 +266,7 @@ extension IMAPConnection {
             logger: logger
         )
 
+        if let authenticationGeneration { try checkAuthenticationGeneration(authenticationGeneration) }
         try await runXOAUTH2Authentication(
             XOAUTH2AuthenticationRun(
                 channel: channel,
@@ -237,7 +274,8 @@ extension IMAPConnection {
                 mechanism: mechanism,
                 initialResponse: initialResponse,
                 handler: handler,
-                handlerPromise: handlerPromise
+                handlerPromise: handlerPromise,
+                authenticationGeneration: authenticationGeneration
             )
         )
     }
@@ -249,6 +287,7 @@ extension IMAPConnection {
         let initialResponse: InitialResponse?
         let handler: XOAUTH2AuthenticationHandler
         let handlerPromise: EventLoopPromise<[Capability]>
+        let authenticationGeneration: Int?
     }
 
     private func runXOAUTH2Authentication(_ run: XOAUTH2AuthenticationRun) async throws {
@@ -258,6 +297,7 @@ extension IMAPConnection {
         let initialResponse = run.initialResponse
         let handler = run.handler
         let handlerPromise: EventLoopPromise<[Capability]> = run.handlerPromise
+        let authenticationGeneration = run.authenticationGeneration
         var scheduledTask: Scheduled<Void>?
 
         do {
@@ -265,13 +305,16 @@ extension IMAPConnection {
             responseBuffer.hasActiveHandler = true
 
             scheduledTask = scheduleXOAUTH2Timeout(channel: channel, promise: handlerPromise)
+            if let authenticationGeneration { try checkAuthenticationGeneration(authenticationGeneration) }
             try await writeAuthenticateCommandFlushed(
                 channel: channel,
                 tag: tag,
                 mechanism: mechanism,
-                initialResponse: initialResponse
+                initialResponse: initialResponse,
+                authenticationGeneration: authenticationGeneration
             )
             let refreshedCapabilities = try await handlerPromise.futureResult.get()
+            if let authenticationGeneration { try checkAuthenticationGeneration(authenticationGeneration) }
 
             scheduledTask?.cancel()
             responseBuffer.hasActiveHandler = false
@@ -317,13 +360,15 @@ extension IMAPConnection {
         channel: Channel,
         tag: String,
         mechanism: AuthenticationMechanism,
-        initialResponse: InitialResponse?
+        initialResponse: InitialResponse?,
+        authenticationGeneration: Int? = nil
     ) async throws {
         let command = TaggedCommand(
             tag: tag,
             command: .authenticate(mechanism: mechanism, initialResponse: initialResponse)
         )
         let wrapped = IMAPClientHandler.OutboundIn.part(CommandStreamPart.tagged(command))
+        if let authenticationGeneration { try checkAuthenticationGeneration(authenticationGeneration) }
         try await channel.writeAndFlush(wrapped).get()
     }
 

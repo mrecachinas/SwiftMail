@@ -65,8 +65,9 @@ public actor IMAPServer {
     /// User-managed named connections keyed by requested name.
     var namedConnections: [String: NamedConnection] = [:]
 
-    /// Waiters for named connections currently being created.
-    var pendingNamedConnectionWaiters: [String: [CheckedContinuation<IMAPNamedConnection, any Error>]] = [:]
+    /// Named connections currently being created, including their transports.
+    var pendingNamedConnections: [String: PendingNamedConnection] = [:]
+    var nextNamedConnectionGeneration: UInt64 = 0
 
     /// Authentication configuration for spawning new connections.
     var authentication: Authentication?
@@ -134,6 +135,14 @@ public actor IMAPServer {
     struct NamedConnection {
         let connection: IMAPConnection
         let handle: IMAPNamedConnection
+        let token: IMAPNamedConnectionToken
+    }
+
+    struct PendingNamedConnection {
+        let connection: IMAPConnection
+        let token: IMAPNamedConnectionToken
+        let validity: IMAPNamedConnectionValidity
+        var waiters: [CheckedContinuation<IMAPNamedConnection, any Error>]
     }
 
     enum AuthenticationMethod {

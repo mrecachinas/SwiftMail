@@ -5,7 +5,9 @@ extension IMAPNamedConnection {
     /// Fetch server capabilities.
     @discardableResult
     public func fetchCapabilities() async throws -> [Capability] {
+        try await ensureAuthenticated()
         let result = try await connection.fetchCapabilities()
+        try validity.check(token)
         recordActivity()
         return result
     }

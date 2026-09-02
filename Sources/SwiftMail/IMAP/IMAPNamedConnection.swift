@@ -8,12 +8,14 @@ import Foundation
 /// which mailbox and commands run on each named connection.
 public actor IMAPNamedConnection {
     public let name: String
+    public nonisolated let token: IMAPNamedConnectionToken
 
     // Widened from `private` to internal so the extensions split across files
     // (Mailbox/Idle/Fetch/Search/Manipulation) can reach them; not part of the
     // public API.
     let connection: IMAPConnection
     let authenticateOnConnection: @Sendable (IMAPConnection) async throws -> Void
+    let validity: IMAPNamedConnectionValidity
 
     /// The timestamp of the last successfully completed command on this connection.
     /// Useful for implementing staleness checks in ephemeral connection patterns.
@@ -28,11 +30,29 @@ public actor IMAPNamedConnection {
     init(
         name: String,
         connection: IMAPConnection,
+        token: IMAPNamedConnectionToken,
+        validity: IMAPNamedConnectionValidity,
         authenticateOnConnection: @escaping @Sendable (IMAPConnection) async throws -> Void
     ) {
         self.name = name
         self.connection = connection
+        self.token = token
+        self.validity = validity
         self.authenticateOnConnection = authenticateOnConnection
+    }
+
+    init(
+        name: String,
+        connection: IMAPConnection,
+        authenticateOnConnection: @escaping @Sendable (IMAPConnection) async throws -> Void
+    ) {
+        self.init(
+            name: name,
+            connection: connection,
+            token: IMAPNamedConnectionToken(name: name, generation: 0),
+            validity: IMAPNamedConnectionValidity(),
+            authenticateOnConnection: authenticateOnConnection
+        )
     }
 
     /// Whether the underlying transport channel is currently active.
@@ -47,8 +67,11 @@ public actor IMAPNamedConnection {
 
     /// Connect (or reconnect) the underlying transport and ensure authentication.
     public func connect() async throws {
+        try validity.check(token)
         try await connection.connect()
+        try validity.check(token)
         try await ensureAuthenticated()
+        try validity.check(token)
     }
 
     /// Disconnect this named connection.
@@ -85,6 +108,7 @@ public actor IMAPNamedConnection {
     }
 
     func ensureAuthenticated() async throws {
+        try validity.check(token)
         guard !connection.isAuthenticated else { return }
 
         if isAuthenticationInFlight {
@@ -99,6 +123,7 @@ public actor IMAPNamedConnection {
         isAuthenticationInFlight = true
         do {
             try await authenticateOnConnection(connection)
+            try validity.check(token)
             completeAuthenticationWaiters(with: .success(()))
         } catch {
             completeAuthenticationWaiters(with: .failure(error))
@@ -125,8 +150,11 @@ public actor IMAPNamedConnection {
     func executeCommand<CommandType: IMAPCommand>(
         _ command: CommandType
     ) async throws -> CommandType.ResultType {
+        try validity.check(token)
         try await ensureAuthenticated()
+        try validity.check(token)
         let result = try await connection.executeCommand(command)
+        try validity.check(token)
         lastActivity = Date()
         return result
     }
@@ -136,5 +164,32 @@ public actor IMAPNamedConnection {
             return mailboxName
         }
         return namespaces.resolveMailboxPath(mailboxName)
+    }
+}
+
+public struct IMAPNamedConnectionToken: Hashable, Sendable {
+    public let name: String
+    public let generation: UInt64
+
+    public init(name: String, generation: UInt64) {
+        self.name = name
+        self.generation = generation
+    }
+}
+
+final class IMAPNamedConnectionValidity: @unchecked Sendable {
+    private let lock = NSLock()
+    private var valid = true
+
+    func invalidate() {
+        lock.withLock { valid = false }
+    }
+
+    func check(_ token: IMAPNamedConnectionToken) throws {
+        guard lock.withLock({ valid }) else {
+            throw IMAPError.connectionFailed(
+                "Named connection \(token.name) generation \(token.generation) is invalid"
+            )
+        }
     }
 }
