@@ -452,6 +452,12 @@ extension IMAPServer {
         lifecycleState.finishSignOut(generation)
     }
 
+    /// Completes sign-out teardown, clearing replay credentials and evicting
+    /// every reusable named lease.
+    public func teardown() async throws {
+        try await closeAllConnections(clearAuthentication: true)
+    }
+
     /// Synchronously force-closes every primary, named, pending, and IDLE
     /// transport. Use ``beginSignOut()`` when credentials must also be fenced.
     public nonisolated func forceCloseAll() {
