@@ -17,6 +17,7 @@ public actor IMAPNamedConnection {
     let authenticateOnConnection: @Sendable (IMAPConnection) async throws -> Void
     let authenticateOnConnectionWithGeneration: (@Sendable (IMAPConnection, Int) async throws -> Void)?
     let validity: IMAPNamedConnectionValidity
+    let lifecycleState: IMAPServerLifecycleState?
 
     /// The timestamp of the last successfully completed command on this connection.
     /// Useful for implementing staleness checks in ephemeral connection patterns.
@@ -34,7 +35,8 @@ public actor IMAPNamedConnection {
         token: IMAPNamedConnectionToken,
         validity: IMAPNamedConnectionValidity,
         authenticateOnConnection: @escaping @Sendable (IMAPConnection) async throws -> Void,
-        authenticateOnConnectionWithGeneration: (@Sendable (IMAPConnection, Int) async throws -> Void)? = nil
+        authenticateOnConnectionWithGeneration: (@Sendable (IMAPConnection, Int) async throws -> Void)? = nil,
+        lifecycleState: IMAPServerLifecycleState? = nil
     ) {
         self.name = name
         self.connection = connection
@@ -42,6 +44,7 @@ public actor IMAPNamedConnection {
         self.validity = validity
         self.authenticateOnConnection = authenticateOnConnection
         self.authenticateOnConnectionWithGeneration = authenticateOnConnectionWithGeneration
+        self.lifecycleState = lifecycleState
     }
 
     init(
@@ -70,6 +73,14 @@ public actor IMAPNamedConnection {
 
     /// Connect (or reconnect) the underlying transport and ensure authentication.
     public func connect() async throws {
+        if let lifecycleState {
+            let registrationEpoch = lifecycleState.captureRegistrationEpoch()
+            guard lifecycleState.register(connection, registrationEpoch: registrationEpoch),
+                  lifecycleState.isCurrentRegistration(connection, epoch: registrationEpoch) else {
+                validity.invalidate()
+                throw CancellationError()
+            }
+        }
         let startup = try validity.bind(to: connection, token: token)
         do {
             try await connection.connect(
@@ -81,9 +92,7 @@ public actor IMAPNamedConnection {
             try validity.check(token)
         } catch {
             // Close only the transport generation this startup was bound to.
-            if !validity.isValid {
-                connection.forceCloseTransport(ifCurrentGeneration: startup.transportGeneration)
-            }
+            connection.forceCloseTransport(ifCurrentGeneration: startup.transportGeneration)
             throw error
         }
     }
@@ -124,11 +133,7 @@ public actor IMAPNamedConnection {
     func ensureAuthenticated(authenticationGeneration: Int? = nil) async throws {
         try validity.check(token)
         guard !connection.isAuthenticated else { return }
-        let startup: IMAPNamedConnectionStartup? = if authenticationGeneration == nil {
-            try validity.bind(to: connection, token: token)
-        } else {
-            nil
-        }
+        let startup = try validity.bind(to: connection, token: token)
 
         if isAuthenticationInFlight {
             do {
@@ -137,9 +142,7 @@ public actor IMAPNamedConnection {
                 }
                 try validity.check(token)
             } catch {
-                if let startup, !validity.isValid {
-                    connection.forceCloseTransport(ifCurrentGeneration: startup.transportGeneration)
-                }
+                connection.forceCloseTransport(ifCurrentGeneration: startup.transportGeneration)
                 throw error
             }
             return
@@ -149,18 +152,17 @@ public actor IMAPNamedConnection {
         // in-flight state so a later call can retry normally.
         isAuthenticationInFlight = true
         do {
-            if let authenticateOnConnectionWithGeneration,
-               let generation = authenticationGeneration ?? startup?.authenticationGeneration {
-                try await authenticateOnConnectionWithGeneration(connection, generation)
+            if let authenticateOnConnectionWithGeneration {
+                try await authenticateOnConnectionWithGeneration(
+                    connection, authenticationGeneration ?? startup.authenticationGeneration
+                )
             } else {
                 try await authenticateOnConnection(connection)
             }
             try validity.check(token)
             completeAuthenticationWaiters(with: .success(()))
         } catch {
-            if let startup, !validity.isValid {
-                connection.forceCloseTransport(ifCurrentGeneration: startup.transportGeneration)
-            }
+            connection.forceCloseTransport(ifCurrentGeneration: startup.transportGeneration)
             completeAuthenticationWaiters(with: .failure(error))
             throw error
         }

@@ -291,7 +291,10 @@ extension IMAPServer {
         }
 
         if let existing = namedConnections[normalizedName] {
-            guard lifecycleState.register(existing.connection) else {
+            let registrationEpoch = lifecycleState.captureRegistrationEpoch()
+            guard lifecycleState.register(
+                existing.connection, registrationEpoch: registrationEpoch
+            ), lifecycleState.isCurrentRegistration(existing.connection, epoch: registrationEpoch) else {
                 throw CancellationError()
             }
             return existing.handle
@@ -324,6 +327,9 @@ extension IMAPServer {
             throw CancellationError()
         }
         let validity = IMAPNamedConnectionValidity()
+        lifecycleState.registerInvalidationHandler(for: connection) {
+            validity.invalidate()
+        }
         pendingNamedConnections[normalizedName] = PendingNamedConnection(
             connection: connection, token: token, validity: validity, waiters: []
         )
@@ -340,7 +346,8 @@ extension IMAPServer {
                 try await authentication.authenticate(
                     on: connection, authenticationGeneration: authenticationGeneration
                 )
-            }
+            },
+            lifecycleState: lifecycleState
         )
 
         do {
@@ -436,8 +443,15 @@ extension IMAPServer {
     /// Synchronously fences replay credentials and force-closes every transport.
     /// This is intentionally non-async so callers can start sign-out before
     /// yielding to actor cleanup or waiting for a stalled command.
-    public nonisolated func beginSignOut() {
+    @discardableResult
+    public nonisolated func beginSignOut() -> UInt64 {
         lifecycleState.beginSignOut()
+    }
+
+    /// Completes sign-out fencing for the matching sign-out generation.
+    /// Cleanup from an older generation cannot reopen the server lifecycle.
+    public func finishSignOut(_ generation: UInt64) {
+        lifecycleState.finishSignOut(generation)
     }
 
     /// Synchronously force-closes every primary, named, pending, and IDLE
@@ -565,12 +579,17 @@ extension IMAPServer {
     }
 
     func closeAllConnections(clearAuthentication: Bool = true) async throws {
+        let signOutGeneration: UInt64?
         if clearAuthentication {
             // Fence replay publication before any teardown await.
             authentication = nil
             lifecycleState.replayEpoch.invalidate()
             lifecycleState.invalidateAuthenticationGenerations()
+            signOutGeneration = lifecycleState.beginSignOut()
+        } else {
+            signOutGeneration = lifecycleState.currentSignOutGeneration()
         }
+        let closingGeneration = lifecycleState.beginClosing()
 
         // Snapshot and evict every entry first. Cancellation and force-close
         // are deliberately synchronous so no teardown await can leave another
@@ -619,6 +638,7 @@ extension IMAPServer {
         try? await primaryConnection.disconnect()
 
         clearMailboxState()
-        lifecycleState.finishSignOut()
+        lifecycleState.finishSignOut(signOutGeneration ?? 0)
+        lifecycleState.finishClosing(closingGeneration)
     }
 }

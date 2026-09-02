@@ -67,6 +67,91 @@ struct NamedConnectionLifecycleTests {
     }
 
     @Test
+    func normalDisconnectBarrierRejectsLateRegistrationsUntilCleanupFinishes() async throws {
+        let state = IMAPServerLifecycleState()
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let epoch = state.captureRegistrationEpoch()
+        let closingGeneration = state.beginClosing()
+        let lateConnection = makeConnection(group: group, identifier: "late")
+
+        #expect(!state.register(lateConnection, registrationEpoch: epoch))
+        #expect(lateConnection.captureTransportGeneration() == 1)
+
+        state.finishClosing(closingGeneration)
+        #expect(state.register(lateConnection))
+        state.unregister(lateConnection)
+        try? await group.shutdownGracefully()
+    }
+
+    @Test
+    func newerSignOutFenceCannotBeClearedByOlderCleanup() async throws {
+        let state = IMAPServerLifecycleState()
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let connection = makeConnection(group: group, identifier: "stale-signout")
+        #expect(state.register(connection))
+        let first = state.beginSignOut()
+        let second = state.beginSignOut()
+
+        state.finishSignOut(first)
+        #expect(!state.register(connection))
+
+        state.finishSignOut(second)
+        #expect(state.register(connection))
+        state.unregister(connection)
+        try? await group.shutdownGracefully()
+    }
+
+    @Test
+    func cachedHandleCannotReconnectAfterSynchronousSignOut() async throws {
+        let state = IMAPServerLifecycleState()
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let connection = makeConnection(group: group, identifier: "cached-signout")
+        let validity = IMAPNamedConnectionValidity()
+        let token = IMAPNamedConnectionToken(name: "cached-signout", generation: 1)
+        #expect(state.register(connection))
+        state.registerInvalidationHandler(for: connection) {
+            validity.invalidate()
+        }
+        let handle = IMAPNamedConnection(
+            name: token.name,
+            connection: connection,
+            token: token,
+            validity: validity,
+            authenticateOnConnection: { _ in },
+            lifecycleState: state
+        )
+
+        let signOutGeneration = state.beginSignOut()
+        #expect(!validity.isValid)
+        do {
+            try await handle.connect()
+            Issue.record("a cached handle must not reconnect after sign-out")
+        } catch {
+            #expect(error is CancellationError || error is IMAPError)
+        }
+        state.finishSignOut(signOutGeneration)
+        try? await group.shutdownGracefully()
+    }
+
+    @Test
+    func overlappingDisconnectAndSignOutKeepTheNewestFence() async throws {
+        let state = IMAPServerLifecycleState()
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let connection = makeConnection(group: group, identifier: "overlap")
+        #expect(state.register(connection))
+
+        let disconnectGeneration = state.beginClosing()
+        let signOutGeneration = state.beginSignOut()
+        state.finishClosing(disconnectGeneration)
+        #expect(!state.register(connection))
+
+        state.finishSignOut(signOutGeneration)
+        #expect(state.register(connection))
+        state.unregister(connection)
+        try? await group.shutdownGracefully()
+    }
+
+    @Test
     func repeatedNamedTeardownDoesNotRetainRegistryEntries() async throws {
         let server = IMAPServer(host: "localhost", port: 1, useTLS: false)
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
