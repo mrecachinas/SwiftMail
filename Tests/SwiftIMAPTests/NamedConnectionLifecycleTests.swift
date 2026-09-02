@@ -248,7 +248,14 @@ private final class LockIsolated<Value>: @unchecked Sendable {
     }
 }
 
-private extension IMAPServer {
+extension IMAPServer {
+    func lifecycleCountsForTesting() -> (connections: Int, handlers: Int) {
+        (
+            lifecycleState.registeredConnectionCountForTesting,
+            lifecycleState.cancellationHandlerCountForTesting
+        )
+    }
+
     func installPendingForTesting(_ pending: PendingNamedConnection) {
         pendingNamedConnections[pending.token.name] = pending
     }
