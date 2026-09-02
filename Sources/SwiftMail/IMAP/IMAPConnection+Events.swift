@@ -4,13 +4,18 @@ import NIOIMAPCore
 import NIO
 
 extension IMAPConnection {
-    func id(_ identification: Identification = Identification()) async throws -> Identification {
+    func id(
+        _ identification: Identification = Identification(),
+        authenticationGeneration: Int? = nil
+    ) async throws -> Identification {
         guard capabilities.contains(.id) else {
             throw IMAPError.commandNotSupported("ID command not supported by server")
         }
 
         let command = IDCommand(identification: identification)
-        return try await executeCommand(command)
+        return try await executeCommand(
+            command, authenticationGeneration: authenticationGeneration
+        )
     }
 
     func noop() async throws -> [IMAPServerEvent] {

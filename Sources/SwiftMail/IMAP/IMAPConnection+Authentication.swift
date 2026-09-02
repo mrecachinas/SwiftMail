@@ -11,9 +11,17 @@ extension IMAPConnection {
             command, authenticationGeneration: authenticationGeneration
         )
         try checkAuthenticationGeneration(authenticationGeneration)
-        isSessionAuthenticated = true
-        try await refreshCapabilities(using: loginCapabilities)
-        await fetchNamespacesIfSupported(useCommandBody: false)
+        guard publishAuthenticationIfCurrent(authenticationGeneration) else {
+            throw CancellationError()
+        }
+        try await refreshCapabilities(
+            using: loginCapabilities,
+            authenticationGeneration: authenticationGeneration
+        )
+        try await fetchNamespacesIfSupported(
+            useCommandBody: false,
+            authenticationGeneration: authenticationGeneration
+        )
     }
 
     /// Authenticate using AUTHENTICATE PLAIN (RFC 4616) with optional SASL-IR (RFC 4959).
@@ -120,11 +128,21 @@ extension IMAPConnection {
 
             scheduledTask?.cancel()
             responseBuffer.hasActiveHandler = false
-            isSessionAuthenticated = true
+            guard let authenticationGeneration,
+                  publishAuthenticationIfCurrent(authenticationGeneration) else {
+                throw CancellationError()
+            }
 
             duplexLogger.flushInboundBuffer()
-            try await refreshCapabilities(using: postAuthCapabilities)
-            await fetchNamespacesIfSupported(useCommandBody: true)
+            try await refreshCapabilities(
+                using: postAuthCapabilities,
+                useCommandBody: true,
+                authenticationGeneration: authenticationGeneration
+            )
+            try await fetchNamespacesIfSupported(
+                useCommandBody: true,
+                authenticationGeneration: authenticationGeneration
+            )
         } catch {
             scheduledTask?.cancel()
             responseBuffer.hasActiveHandler = false
@@ -321,7 +339,10 @@ extension IMAPConnection {
             await handleConnectionTerminationInResponses(handler.untaggedResponses)
             duplexLogger.flushInboundBuffer()
 
-            isSessionAuthenticated = true
+            guard let authenticationGeneration,
+                  publishAuthenticationIfCurrent(authenticationGeneration) else {
+                throw CancellationError()
+            }
             // AUTHENTICATE often returns an OK without CAPABILITY data, and RFC 3501
             // invalidates the pre-authentication capability set once authentication
             // succeeds. Refresh from the server instead of retaining the stale
@@ -329,8 +350,15 @@ extension IMAPConnection {
             // would otherwise miss capabilities the server only advertises after
             // authentication. useCommandBody avoids re-entering the command queue
             // this method already holds, like the namespace fetch below.
-            try await refreshCapabilities(using: refreshedCapabilities, useCommandBody: true)
-            await fetchNamespacesIfSupported(useCommandBody: true)
+            try await refreshCapabilities(
+                using: refreshedCapabilities,
+                useCommandBody: true,
+                authenticationGeneration: authenticationGeneration
+            )
+            try await fetchNamespacesIfSupported(
+                useCommandBody: true,
+                authenticationGeneration: authenticationGeneration
+            )
         } catch {
             await handleXOAUTH2Failure(
                 error: error,

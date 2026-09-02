@@ -186,7 +186,10 @@ public actor IMAPServer {
             // authenticated connection that has not identified itself, so the
             // stored identity is replayed after every authentication.
             guard let identification else { return }
-            try await Self.identify(connection, with: identification)
+            try await Self.identify(
+                connection, with: identification,
+                authenticationGeneration: authenticationGeneration
+            )
         }
 
         /// Replays the stored RFC 2971 identity on a freshly authenticated
@@ -200,12 +203,15 @@ public actor IMAPServer {
         /// connected or authenticated.
         static func identify(
             _ connection: IMAPConnection,
-            with identification: Identification
+            with identification: Identification,
+            authenticationGeneration: Int? = nil
         ) async throws {
             guard connection.capabilitiesSnapshot.contains(.id) else { return }
 
             do {
-                _ = try await connection.id(identification)
+                _ = try await connection.id(
+                    identification, authenticationGeneration: authenticationGeneration
+                )
             } catch let error as CancellationError {
                 throw error
             } catch {

@@ -92,6 +92,43 @@ final class IMAPConnection {
         }
     }
 
+    /// Publish authentication only when the operation still owns the
+    /// authentication generation it captured before starting.
+    @discardableResult
+    func publishAuthenticationIfCurrent(_ generation: Int) -> Bool {
+        transportState.lock.withLock {
+            guard transportState.authenticationGeneration == generation else { return false }
+            transportState.isSessionAuthenticated = true
+            return true
+        }
+    }
+
+    func publishCapabilities(
+        _ capabilities: Set<NIOIMAPCore.Capability>,
+        authenticationGeneration: Int? = nil
+    ) throws {
+        try transportState.lock.withLock {
+            if let authenticationGeneration,
+               transportState.authenticationGeneration != authenticationGeneration {
+                throw CancellationError()
+            }
+            transportState.capabilities = capabilities
+        }
+    }
+
+    func publishNamespaces(
+        _ namespaces: NamespaceResponse?,
+        authenticationGeneration: Int? = nil
+    ) throws {
+        try transportState.lock.withLock {
+            if let authenticationGeneration,
+               transportState.authenticationGeneration != authenticationGeneration {
+                throw CancellationError()
+            }
+            transportState.namespaces = namespaces
+        }
+    }
+
     func publishChannelIfCurrent(_ channel: Channel, generation: Int) -> Bool {
         transportState.lock.lock()
         defer { transportState.lock.unlock() }

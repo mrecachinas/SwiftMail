@@ -4,10 +4,16 @@ import NIOIMAPCore
 import NIO
 
 extension IMAPConnection {
-    @discardableResult func fetchCapabilities() async throws -> [Capability] {
+    @discardableResult func fetchCapabilities(
+        authenticationGeneration: Int? = nil
+    ) async throws -> [Capability] {
         let command = CapabilityCommand()
-        let serverCapabilities = try await executeCommand(command)
-        self.capabilities = Set(serverCapabilities)
+        let serverCapabilities = try await executeCommand(
+            command, authenticationGeneration: authenticationGeneration
+        )
+        try publishCapabilities(
+            Set(serverCapabilities), authenticationGeneration: authenticationGeneration
+        )
         return serverCapabilities
     }
 
@@ -15,17 +21,27 @@ extension IMAPConnection {
     /// server reported none — with the result of an explicit CAPABILITY command.
     /// Pass `useCommandBody: true` from call sites that already hold the command
     /// queue (mirrors `fetchNamespacesIfSupported(useCommandBody:)`).
-    func refreshCapabilities(using reportedCapabilities: [Capability], useCommandBody: Bool = false) async throws {
+    func refreshCapabilities(
+        using reportedCapabilities: [Capability],
+        useCommandBody: Bool = false,
+        authenticationGeneration: Int? = nil
+    ) async throws {
         if !reportedCapabilities.isEmpty {
-            self.capabilities = Set(reportedCapabilities)
+            try publishCapabilities(
+                Set(reportedCapabilities), authenticationGeneration: authenticationGeneration
+            )
             return
         }
 
         if useCommandBody {
-            let refreshedCapabilities = try await executeCommandBody(CapabilityCommand())
-            self.capabilities = Set(refreshedCapabilities)
+            let refreshedCapabilities = try await executeCommandBody(
+                CapabilityCommand(), authenticationGeneration: authenticationGeneration
+            )
+            try publishCapabilities(
+                Set(refreshedCapabilities), authenticationGeneration: authenticationGeneration
+            )
         } else {
-            try await fetchCapabilities()
+            try await fetchCapabilities(authenticationGeneration: authenticationGeneration)
         }
     }
 
@@ -35,20 +51,38 @@ extension IMAPConnection {
         return response
     }
 
-    func fetchNamespacesIfSupported(useCommandBody: Bool) async {
+    func fetchNamespacesIfSupported(
+        useCommandBody: Bool,
+        authenticationGeneration: Int? = nil
+    ) async throws {
+        if let authenticationGeneration {
+            try checkAuthenticationGeneration(authenticationGeneration)
+        }
         let namespaceCapability = Capability("NAMESPACE")
         guard capabilities.contains(namespaceCapability) else {
-            namespaces = nil
+            try publishNamespaces(nil, authenticationGeneration: authenticationGeneration)
             return
         }
 
         do {
+            let response: NamespaceResponse
             if useCommandBody {
-                namespaces = try await executeCommandBody(NamespaceCommand())
+                response = try await executeCommandBody(
+                    NamespaceCommand(), authenticationGeneration: authenticationGeneration
+                )
             } else {
-                namespaces = try await executeCommand(NamespaceCommand())
+                response = try await executeCommand(
+                    NamespaceCommand(), authenticationGeneration: authenticationGeneration
+                )
             }
+            try publishNamespaces(response, authenticationGeneration: authenticationGeneration)
         } catch {
+            if error is CancellationError {
+                throw error
+            }
+            if let authenticationGeneration {
+                try checkAuthenticationGeneration(authenticationGeneration)
+            }
             logger.warning("\(connectionContext) Failed to fetch namespace metadata: \(error)")
         }
     }
@@ -157,6 +191,9 @@ extension IMAPConnection {
             }
             try await command.send(on: channel, tag: tag)
             let result = try await resultPromise.futureResult.get()
+            if let authenticationGeneration {
+                try checkAuthenticationGeneration(authenticationGeneration)
+            }
 
             scheduledTask.cancel()
             responseBuffer.hasActiveHandler = false

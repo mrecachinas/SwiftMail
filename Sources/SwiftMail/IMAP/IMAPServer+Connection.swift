@@ -114,12 +114,18 @@ extension IMAPServer {
      - Note: Logs login attempts at info level (without credentials)
      */
     public func login(username: String, password: String) async throws {
-        try await primaryConnection.login(username: username, password: password)
+        let authenticationGeneration = primaryConnection.captureAuthenticationGeneration()
+        try await primaryConnection.login(
+            username: username, password: password,
+            authenticationGeneration: authenticationGeneration
+        )
         authentication = Authentication(
             method: .login(username: username, password: password),
             identification: clientIdentification
         )
-        try await identifyPrimaryConnectionIfNeeded()
+        try await identifyPrimaryConnectionIfNeeded(
+            authenticationGeneration: authenticationGeneration
+        )
         namespaces = primaryConnection.namespacesSnapshot
     }
 
@@ -135,12 +141,18 @@ extension IMAPServer {
     /// - Throws: ``IMAPError.unsupportedAuthMechanism`` if the server does not advertise AUTH=PLAIN,
     ///   or ``IMAPError.authFailed`` when authentication fails.
     public func authenticatePlain(username: String, password: String) async throws {
-        try await primaryConnection.authenticatePlain(username: username, password: password)
+        let authenticationGeneration = primaryConnection.captureAuthenticationGeneration()
+        try await primaryConnection.authenticatePlain(
+            username: username, password: password,
+            authenticationGeneration: authenticationGeneration
+        )
         authentication = Authentication(
             method: .plain(username: username, password: password),
             identification: clientIdentification
         )
-        try await identifyPrimaryConnectionIfNeeded()
+        try await identifyPrimaryConnectionIfNeeded(
+            authenticationGeneration: authenticationGeneration
+        )
         namespaces = primaryConnection.namespacesSnapshot
     }
 
@@ -151,12 +163,18 @@ extension IMAPServer {
     /// - Throws: ``IMAPError.unsupportedAuthMechanism`` if the server does not advertise XOAUTH2 or
     ///   ``IMAPError.authFailed`` when authentication fails.
     public func authenticateXOAUTH2(email: String, accessToken: String) async throws {
-        try await primaryConnection.authenticateXOAUTH2(email: email, accessToken: accessToken)
+        let authenticationGeneration = primaryConnection.captureAuthenticationGeneration()
+        try await primaryConnection.authenticateXOAUTH2(
+            email: email, accessToken: accessToken,
+            authenticationGeneration: authenticationGeneration
+        )
         authentication = Authentication(
             method: .xoauth2(email: email, accessTokenProvider: { accessToken }),
             identification: clientIdentification
         )
-        try await identifyPrimaryConnectionIfNeeded()
+        try await identifyPrimaryConnectionIfNeeded(
+            authenticationGeneration: authenticationGeneration
+        )
         namespaces = primaryConnection.namespacesSnapshot
     }
 
@@ -192,9 +210,14 @@ extension IMAPServer {
     /// RFC 2971 replay for the primary connection's explicit authentication
     /// paths, with the same failure semantics as the internal replay in
     /// ``Authentication/identify(_:with:)``.
-    private func identifyPrimaryConnectionIfNeeded() async throws {
+    private func identifyPrimaryConnectionIfNeeded(
+        authenticationGeneration: Int? = nil
+    ) async throws {
         guard let clientIdentification else { return }
-        try await Authentication.identify(primaryConnection, with: clientIdentification)
+        try await Authentication.identify(
+            primaryConnection, with: clientIdentification,
+            authenticationGeneration: authenticationGeneration
+        )
     }
 
     /// Identify the client to the server using the `ID` command.
