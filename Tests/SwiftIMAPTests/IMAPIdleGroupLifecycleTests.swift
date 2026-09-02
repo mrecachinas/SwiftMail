@@ -154,6 +154,40 @@ import Testing
                 // A redundant done() after disconnect must be safe and idempotent.
                 try? await session.done()
             }
+
+        }
+
+        @Test
+        func logoutTerminatesIdleSessionBeforeReconnectCanStart() async throws {
+            let (testServer, tempRoot) = try makeTestServer()
+            try testServer.start()
+            defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+            try await testServer.run {
+                let server = IMAPServer(host: "127.0.0.1", port: testServer.port, useTLS: false)
+                try await server.connect()
+                try await server.login(username: "u", password: "p")
+                let configuration = IMAPIdleConfiguration(
+                    renewalInterval: 60,
+                    noopInterval: 60,
+                    postIdleNoopEnabled: false,
+                    postIdleNoopDelay: 0,
+                    doneTimeout: 2,
+                    reconnectBaseDelay: 0.01,
+                    reconnectMaxDelay: 0.05,
+                    reconnectJitterFactor: 0
+                )
+                let session = try await server.idle(on: "INBOX", configuration: configuration)
+                #expect(try await waitForIdleCommandCount(testServer, atLeast: 1))
+                let idleCommandsBeforeLogout = testServer.idleCommandCount
+                let connectionsBeforeLogout = testServer.acceptedConnectionCount
+
+                try await server.logout()
+                #expect(await waitForStreamFinish(session))
+                try await Task.sleep(nanoseconds: 500_000_000)
+                #expect(testServer.idleCommandCount == idleCommandsBeforeLogout)
+                #expect(testServer.acceptedConnectionCount == connectionsBeforeLogout)
+            }
         }
 
         /// Consumers end IDLE producers with `try? await session.done()` from a

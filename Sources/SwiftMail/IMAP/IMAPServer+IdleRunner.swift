@@ -51,6 +51,7 @@ struct IdleCycleContext {
     let resolvedMailbox: String
     let configuration: IMAPIdleConfiguration
     let authentication: IMAPServer.Authentication
+    let authenticationGeneration: Int
     let continuation: AsyncStream<IMAPServerEvent>.Continuation
     let logger: Logger
 }

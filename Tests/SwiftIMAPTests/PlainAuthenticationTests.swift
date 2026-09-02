@@ -96,4 +96,38 @@ struct PlainAuthenticationTests {
             #expect(error is IMAPError)
         }
     }
+
+    @Test
+    func testContinuationAfterInvalidationIsRejectedWithoutWritingCredentials() async throws {
+        let channel = try await NIOAsyncTestingChannel.withIMAPClientHandler()
+        let promise = channel.eventLoop.makePromise(of: [Capability].self)
+        var creds = channel.allocator.buffer(capacity: 16)
+        creds.writeString("\0user\0secret")
+        let handler = PlainAuthenticationHandler(
+            commandTag: "A003",
+            promise: promise,
+            credentials: creds,
+            expectsChallenge: true,
+            credentialWriter: { _, _ in throw CancellationError() }
+        )
+        try await channel.pipeline.addHandler(handler)
+
+        let command = TaggedCommand(tag: "A003", command: .authenticate(
+            mechanism: AuthenticationMechanism("PLAIN"), initialResponse: nil
+        ))
+        try await channel.writeAndFlush(IMAPClientHandler.OutboundIn.part(.tagged(command)))
+        _ = try await channel.readOutbound(as: ByteBuffer.self)
+
+        var challenge = channel.allocator.buffer(capacity: 8)
+        challenge.writeString("+ \r\n")
+        try await channel.writeInbound(challenge)
+
+        do {
+            _ = try await promise.futureResult.get()
+            Issue.record("Expected invalidated continuation to fail")
+        } catch {
+            #expect(error is CancellationError)
+        }
+        #expect(try await channel.readOutbound(as: ByteBuffer.self) == nil)
+    }
 }

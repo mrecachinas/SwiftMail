@@ -89,10 +89,18 @@ extension IMAPResilientIdleRunner {
             // (NIO futures), so re-check before dialing a session that is being
             // torn down. Teardown still force-closes anything that slips past.
             if Task.isCancelled { return }
-            try await context.connection.connect()
-            try await context.authentication.authenticate(on: context.connection)
+            try await context.connection.connect(
+                expectedGeneration: context.connection.captureTransportGeneration(),
+                authenticationGeneration: context.authenticationGeneration
+            )
+            try await context.authentication.authenticate(
+                on: context.connection,
+                authenticationGeneration: context.authenticationGeneration
+            )
             let selectCommand = SelectMailboxCommand(mailboxName: context.resolvedMailbox)
-            _ = try await context.connection.executeCommand(selectCommand)
+            _ = try await context.connection.executeCommand(
+                selectCommand, authenticationGeneration: context.authenticationGeneration
+            )
 
             state.resetAfterReconnect(configuration: context.configuration)
             context.logger.info("Reconnected IDLE session for mailbox '\(context.mailbox)'")
@@ -139,10 +147,18 @@ extension IMAPResilientIdleRunner {
             // done/disconnect, and cancellation may have landed since. Don't
             // re-dial a session that teardown is waiting on.
             if Task.isCancelled { return }
-            try await context.connection.connect()
-            try await context.authentication.authenticate(on: context.connection)
+            try await context.connection.connect(
+                expectedGeneration: context.connection.captureTransportGeneration(),
+                authenticationGeneration: context.authenticationGeneration
+            )
+            try await context.authentication.authenticate(
+                on: context.connection,
+                authenticationGeneration: context.authenticationGeneration
+            )
             let selectCommand = SelectMailboxCommand(mailboxName: context.resolvedMailbox)
-            _ = try await context.connection.executeCommand(selectCommand)
+            _ = try await context.connection.executeCommand(
+                selectCommand, authenticationGeneration: context.authenticationGeneration
+            )
 
             state.resetAfterReconnect(configuration: context.configuration)
             context.logger.info("Reconnected IDLE session for mailbox '\(context.mailbox)'")

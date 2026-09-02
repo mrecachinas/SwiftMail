@@ -3,6 +3,18 @@ import Foundation
 import NIOIMAPCore
 import NIO
 
+/// Compatibility writer for isolated handler tests that do not have an
+/// IMAPConnection generation to validate. Production authentication always
+/// supplies `enqueueCredentialWrite` through the handler's writer closure.
+enum IMAPCredentialWriteFallback {
+    static func write(
+        _ wrapped: IMAPClientHandler.Message,
+        on channel: Channel
+    ) -> EventLoopFuture<Void> {
+        channel.writeAndFlush(wrapped)
+    }
+}
+
 extension IMAPConnection {
     @discardableResult func fetchCapabilities(
         authenticationGeneration: Int? = nil

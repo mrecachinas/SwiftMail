@@ -52,7 +52,8 @@ extension IMAPConnection {
     func authenticatePlainBody(
         username: String, password: String, authenticationGeneration: Int? = nil
     ) async throws {
-        if let authenticationGeneration { try checkAuthenticationGeneration(authenticationGeneration) }
+        let authenticationGeneration = authenticationGeneration ?? captureAuthenticationGeneration()
+        try checkAuthenticationGeneration(authenticationGeneration)
         let mechanism = AuthenticationMechanism("PLAIN")
         let plainCapability = Capability.authenticate(mechanism)
 
@@ -73,10 +74,11 @@ extension IMAPConnection {
             commandTag: tag,
             promise: handlerPromise,
             credentials: credentialBuffer,
-            expectsChallenge: expectsChallenge
+            expectsChallenge: expectsChallenge,
+            credentialWriter: makeCredentialWriter(authenticationGeneration: authenticationGeneration)
         )
 
-        if let authenticationGeneration { try checkAuthenticationGeneration(authenticationGeneration) }
+        try checkAuthenticationGeneration(authenticationGeneration)
         try await runPlainAuthentication(
             PlainAuthenticationRun(
                 channel: channel,
@@ -266,7 +268,8 @@ extension IMAPConnection {
     func authenticateXOAUTH2Body(
         email: String, accessToken: String, authenticationGeneration: Int? = nil
     ) async throws {
-        if let authenticationGeneration { try checkAuthenticationGeneration(authenticationGeneration) }
+        let authenticationGeneration = authenticationGeneration ?? captureAuthenticationGeneration()
+        try checkAuthenticationGeneration(authenticationGeneration)
         let mechanism = AuthenticationMechanism("XOAUTH2")
         let xoauthCapability = Capability.authenticate(mechanism)
 
@@ -288,10 +291,11 @@ extension IMAPConnection {
             promise: handlerPromise,
             credentials: credentialBuffer,
             expectsChallenge: expectsChallenge,
-            logger: logger
+            logger: logger,
+            credentialWriter: makeCredentialWriter(authenticationGeneration: authenticationGeneration)
         )
 
-        if let authenticationGeneration { try checkAuthenticationGeneration(authenticationGeneration) }
+        try checkAuthenticationGeneration(authenticationGeneration)
         try await runXOAUTH2Authentication(
             XOAUTH2AuthenticationRun(
                 channel: channel,
@@ -411,6 +415,26 @@ extension IMAPConnection {
             ).get()
         } else {
             try await channel.writeAndFlush(wrapped).get()
+        }
+
+    }
+
+    /// Construct the single credential-bearing write fence used by both SASL
+    /// continuation handlers. The closure is synchronous at the NIO boundary:
+    /// invalidation cannot interleave between generation validation and enqueue.
+    private func makeCredentialWriter(
+        authenticationGeneration: Int
+    ) -> @Sendable (Channel, ByteBuffer) throws -> EventLoopFuture<Void> {
+        { [weak self] channel, buffer in
+            guard let self else { throw CancellationError() }
+            let wrapped = IMAPClientHandler.OutboundIn.part(
+                .continuationResponse(buffer)
+            )
+            return try self.enqueueCredentialWrite(
+                wrapped,
+                on: channel,
+                authenticationGeneration: authenticationGeneration
+            )
         }
     }
 

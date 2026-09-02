@@ -129,6 +129,23 @@ struct AuthenticationGenerationFenceTests {
         #expect(await server.authentication == nil)
     }
 
+    @Test
+    func failedLogoutStillClearsReplayCredentialsAndClosesTransport() async throws {
+        let server = IMAPServer(host: "127.0.0.1", port: 1, useTLS: false)
+        await server.setXOAUTH2AccessTokenProvider(email: "user@example.com") { "token" }
+
+        do {
+            try await server.logout()
+            Issue.record("logout should fail when the transport cannot connect")
+        } catch {
+            // The connection failure is the original logout error; cleanup
+            // must still fence and clear the replay credential.
+        }
+
+        #expect(await server.authentication == nil)
+        #expect(!(await server.isConnected))
+    }
+
     private func makeConnection(group: EventLoopGroup) -> IMAPConnection {
         IMAPConnection(
             host: "localhost", port: 1, useTLS: false, group: group,

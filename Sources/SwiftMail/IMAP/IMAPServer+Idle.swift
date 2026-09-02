@@ -59,6 +59,7 @@ extension IMAPServer {
         // IDLE cycle task (which is Task.detached and can outlive the server).
         let idleGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let connection = makeIdleConnection(sessionID: sessionID, mailbox: resolvedMailbox, group: idleGroup)
+        let authenticationGeneration = connection.captureAuthenticationGeneration()
         idleConnections[sessionID] = IdleConnection(
             mailbox: resolvedMailbox,
             connection: connection,
@@ -68,9 +69,17 @@ extension IMAPServer {
         )
 
         do {
-            try await connection.connect()
-            try await authentication.authenticate(on: connection)
-            _ = try await connection.executeCommand(SelectMailboxCommand(mailboxName: resolvedMailbox))
+            try await connection.connect(
+                expectedGeneration: connection.captureTransportGeneration(),
+                authenticationGeneration: authenticationGeneration
+            )
+            try await authentication.authenticate(
+                on: connection, authenticationGeneration: authenticationGeneration
+            )
+            _ = try await connection.executeCommand(
+                SelectMailboxCommand(mailboxName: resolvedMailbox),
+                authenticationGeneration: authenticationGeneration
+            )
 
             let request = IdleSessionRequest(
                 sessionID: sessionID,
@@ -79,7 +88,8 @@ extension IMAPServer {
                 connection: connection,
                 idleGroup: idleGroup,
                 configuration: idleConfiguration,
-                authentication: authentication
+                authentication: authentication,
+                authenticationGeneration: authenticationGeneration
             )
             return startResilientIdleSession(request: request)
         } catch {
@@ -141,6 +151,7 @@ extension IMAPServer {
             resolvedMailbox: request.resolvedMailbox,
             configuration: request.configuration,
             authentication: request.authentication,
+            authenticationGeneration: request.authenticationGeneration,
             continuation: continuation,
             logger: cycleLogger
         )
@@ -207,4 +218,5 @@ struct IdleSessionRequest {
     let idleGroup: EventLoopGroup
     let configuration: IMAPIdleConfiguration
     let authentication: IMAPServer.Authentication
+    let authenticationGeneration: Int
 }

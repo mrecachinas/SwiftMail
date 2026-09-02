@@ -10,8 +10,11 @@ import NIOIMAPCore
 /// with the AUTHENTICATE command. Otherwise, the handler waits for the server's
 /// continuation challenge before sending credentials.
 final class PlainAuthenticationHandler: BaseIMAPCommandHandler<[Capability]>, IMAPCommandHandler, @unchecked Sendable {
+    typealias CredentialWriter = @Sendable (Channel, ByteBuffer) throws -> EventLoopFuture<Void>
+
     private var collectedCapabilities: [Capability] = []
     private var credentials: ByteBuffer
+    private let credentialWriter: CredentialWriter?
     private var shouldSendOnChallenge: Bool
     private let sentInlineInitialResponse: Bool
     private var fallbackContinuationSent = false
@@ -20,9 +23,11 @@ final class PlainAuthenticationHandler: BaseIMAPCommandHandler<[Capability]>, IM
         commandTag: String,
         promise: EventLoopPromise<[Capability]>,
         credentials: ByteBuffer,
-        expectsChallenge: Bool
+        expectsChallenge: Bool,
+        credentialWriter: CredentialWriter? = nil
     ) {
         self.credentials = credentials
+        self.credentialWriter = credentialWriter
         self.shouldSendOnChallenge = expectsChallenge
         self.sentInlineInitialResponse = !expectsChallenge
         super.init(commandTag: commandTag, promise: promise)
@@ -56,15 +61,39 @@ final class PlainAuthenticationHandler: BaseIMAPCommandHandler<[Capability]>, IM
             }
 
             if sendCredentials {
-                let credentialBuffer = credentials
-                credentials = context.channel.allocator.buffer(capacity: 0)
-                context.channel
-                    .writeAndFlush(IMAPClientHandler.OutboundIn.part(.continuationResponse(credentialBuffer)))
-                    .cascadeFailure(to: promise)
+                sendContinuation(context: context)
             }
         }
 
         super.channelRead(context: context, data: data)
+    }
+
+    /// Move the credential buffer out before crossing the NIO boundary. The
+    /// writer supplied by IMAPConnection performs the generation/channel check
+    /// while holding the same lock used by transport invalidation.
+    private func sendContinuation(context: ChannelHandlerContext) {
+        let credentialBuffer = lock.withLock {
+            let value = credentials
+            credentials = ByteBuffer()
+            return value
+        }
+
+        do {
+            let future: EventLoopFuture<Void>
+            if let credentialWriter {
+                future = try credentialWriter(context.channel, credentialBuffer)
+            } else {
+                // Legacy direct-handler tests have no connection generation to
+                // fence. Production authentication always supplies a writer.
+                future = IMAPCredentialWriteFallback.write(
+                    IMAPClientHandler.OutboundIn.part(.continuationResponse(credentialBuffer)),
+                    on: context.channel
+                )
+            }
+            future.cascadeFailure(to: promise)
+        } catch {
+            failWithError(error)
+        }
     }
 
     override func handleTaggedOKResponse(_ response: TaggedResponse) {

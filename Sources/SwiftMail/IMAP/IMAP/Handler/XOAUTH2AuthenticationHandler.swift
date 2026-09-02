@@ -9,9 +9,12 @@ final class XOAUTH2AuthenticationHandler:
     BaseIMAPCommandHandler<[Capability]>,
     IMAPCommandHandler,
     @unchecked Sendable {
+    typealias CredentialWriter = @Sendable (Channel, ByteBuffer) throws -> EventLoopFuture<Void>
+
     private var collectedCapabilities: [Capability] = []
     private var shouldSendCredentialsOnChallenge: Bool
     private var credentials: ByteBuffer
+    private let credentialWriter: CredentialWriter?
     private let sentInlineInitialResponse: Bool
     private let serverLogger: Logger
     private var lastServerError: String?
@@ -22,9 +25,11 @@ final class XOAUTH2AuthenticationHandler:
         promise: EventLoopPromise<[Capability]>,
         credentials: ByteBuffer,
         expectsChallenge: Bool,
-        logger: Logger
+        logger: Logger,
+        credentialWriter: CredentialWriter? = nil
     ) {
         self.credentials = credentials
+        self.credentialWriter = credentialWriter
         self.shouldSendCredentialsOnChallenge = expectsChallenge
         self.serverLogger = logger
         self.sentInlineInitialResponse = !expectsChallenge
@@ -65,12 +70,7 @@ final class XOAUTH2AuthenticationHandler:
         }
 
         if sendCredentials {
-            let credentialBuffer = credentials
-            credentials = context.channel.allocator.buffer(capacity: 0)
-
-            context.channel
-                .writeAndFlush(IMAPClientHandler.OutboundIn.part(.continuationResponse(credentialBuffer)))
-                .cascadeFailure(to: promise)
+            sendContinuation(credentials, context: context)
             return
         }
 
@@ -81,10 +81,42 @@ final class XOAUTH2AuthenticationHandler:
             lock.withLock { lastServerError = nil }
         }
 
-        let emptyBuffer = context.channel.allocator.buffer(capacity: 0)
-        context.channel
-            .writeAndFlush(IMAPClientHandler.OutboundIn.part(.continuationResponse(emptyBuffer)))
-            .cascadeFailure(to: promise)
+        sendContinuation(context.channel.allocator.buffer(capacity: 0), context: context)
+    }
+
+    /// Route both credential and empty challenge responses through the
+    /// connection-owned writer. The credential field is erased before the
+    /// writer can suspend or reject an invalidated generation.
+    private func sendContinuation(_ buffer: ByteBuffer, context: ChannelHandlerContext) {
+        let continuationBuffer = lock.withLock {
+            if buffer.readableBytes > 0 {
+                let value = credentials
+                credentials = ByteBuffer()
+                return value
+            }
+            // A server error challenge is terminal for the credential
+            // exchange; do not retain a token while sending the required
+            // empty response.
+            credentials = ByteBuffer()
+            return buffer
+        }
+
+        do {
+            let future: EventLoopFuture<Void>
+            if let credentialWriter {
+                future = try credentialWriter(context.channel, continuationBuffer)
+            } else {
+                // Legacy direct-handler tests have no connection generation to
+                // fence. Production authentication always supplies a writer.
+                future = IMAPCredentialWriteFallback.write(
+                    IMAPClientHandler.OutboundIn.part(.continuationResponse(continuationBuffer)),
+                    on: context.channel
+                )
+            }
+            future.cascadeFailure(to: promise)
+        } catch {
+            failWithError(error)
+        }
     }
 
     override func handleTaggedOKResponse(_ response: TaggedResponse) {

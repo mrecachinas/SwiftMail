@@ -113,6 +113,39 @@ struct XOAUTH2AuthenticationHandlerTests {
     }
 
     @Test
+    func testContinuationAfterInvalidationIsRejectedWithoutWritingCredentials() async throws {
+        let channel = try await NIOAsyncTestingChannel.withIMAPClientHandler()
+        let promise = channel.eventLoop.makePromise(of: [Capability].self)
+        let handler = XOAUTH2AuthenticationHandler(
+            commandTag: "A002B",
+            promise: promise,
+            credentials: makeCredentialBuffer(using: channel.allocator),
+            expectsChallenge: true,
+            logger: logger,
+            credentialWriter: { _, _ in throw CancellationError() }
+        )
+        try await channel.pipeline.addHandler(handler)
+
+        let command = TaggedCommand(tag: "A002B", command: .authenticate(
+            mechanism: AuthenticationMechanism("XOAUTH2"), initialResponse: nil
+        ))
+        try await channel.writeAndFlush(IMAPClientHandler.OutboundIn.part(.tagged(command)))
+        _ = try await channel.readOutbound(as: ByteBuffer.self)
+
+        var challenge = channel.allocator.buffer(capacity: 8)
+        challenge.writeString("+ \r\n")
+        try await channel.writeInbound(challenge)
+
+        do {
+            _ = try await promise.futureResult.get()
+            Issue.record("Expected invalidated continuation to fail")
+        } catch {
+            #expect(error is CancellationError)
+        }
+        #expect(try await channel.readOutbound(as: ByteBuffer.self) == nil)
+    }
+
+    @Test
     func testSASLIRServerSendsEmptyChallengeRetriesCredentials() async throws {
         let setup = try await setUpChannel(tag: "A002A", expectsChallenge: false)
         let channel = setup.channel

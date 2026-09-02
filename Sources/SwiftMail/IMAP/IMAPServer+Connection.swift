@@ -372,8 +372,29 @@ extension IMAPServer {
      */
     public func logout() async throws {
         let command = LogoutCommand()
-        try await executeCommand(command)
-        try await closeAllConnections(clearAuthentication: true)
+        var logoutError: Error?
+        do {
+            try await executeCommand(command)
+        } catch {
+            // LOGOUT is best effort, but its original protocol/timeout error
+            // must remain the one visible to the caller.
+            logoutError = error
+        }
+
+        do {
+            // This runs on success, timeout, and every command failure path.
+            // closeAllConnections fences replay credentials and force-closes
+            // every transport before awaiting any teardown.
+            try await closeAllConnections(clearAuthentication: true)
+        } catch {
+            if logoutError == nil {
+                logoutError = error
+            }
+        }
+
+        if let logoutError {
+            throw logoutError
+        }
     }
 
     /// Clears credentials retained for transparent reconnect authentication.
@@ -491,21 +512,28 @@ extension IMAPServer {
 
     func closeAllConnections(clearAuthentication: Bool = true) async throws {
         if clearAuthentication {
-            // Fence in-flight authentication before any teardown await. This
-            // also prevents credentials from being published after logout.
+            // Fence replay publication before any teardown await.
             authentication = nil
             primaryConnection.invalidateAuthenticationGeneration()
         }
 
+        // Snapshot and evict every entry first. Cancellation and force-close
+        // are deliberately synchronous so no teardown await can leave another
+        // transport (or an IDLE reconnect) alive.
         let idleEntries = idleConnections
         idleConnections.removeAll()
 
-        for entry in idleEntries.values {
-            await teardownIdleEntry(entry)
-        }
-
         let pendingEntries = pendingNamedConnections
         pendingNamedConnections.removeAll()
+
+        let namedEntries = namedConnections
+        namedConnections.removeAll()
+
+        for entry in idleEntries.values {
+            entry.cycleTask?.cancel()
+            entry.connection.forceCloseTransport()
+        }
+
         let cancellationError = CancellationError()
         for pending in pendingEntries.values {
             pending.validity.invalidate()
@@ -513,17 +541,24 @@ extension IMAPServer {
             pending.waiters.forEach { $0.continuation.resume(throwing: cancellationError) }
         }
 
-        let namedEntries = namedConnections
-        namedConnections.removeAll()
-
         for entry in namedEntries.values {
             entry.handle.validity.invalidate()
-            try? await entry.connection.done()
+            entry.connection.forceCloseTransport()
+        }
+
+        primaryConnection.forceCloseTransport()
+
+        // All transports are fenced/closed above. The remaining awaits only
+        // release task and event-loop resources and cannot trigger a reconnect.
+        for entry in idleEntries.values {
+            await teardownIdleEntry(entry)
+        }
+
+        for entry in namedEntries.values {
             try? await entry.connection.disconnect()
         }
 
-        try? await primaryConnection.done()
-        try await primaryConnection.disconnect()
+        try? await primaryConnection.disconnect()
 
         clearMailboxState()
     }
